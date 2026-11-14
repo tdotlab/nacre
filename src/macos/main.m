@@ -182,8 +182,6 @@ static void timer_tick(Chip8 *chip8, void *userdata) {
     NSFont *wordmark = [NSFont fontWithName:@"Georgia" size:31] ?: [NSFont systemFontOfSize:31];
     [@"nacre" drawAtPoint:NSMakePoint(66, 22) withAttributes:@{
         NSFontAttributeName:wordmark, NSForegroundColorAttributeName:color(0x293D34)}];
-    text(@"A LITTLE MACHINE, WELL KEPT.", NSMakeRect(26, 68, 184, 18), 8.5,
-         NSFontWeightMedium, 0x788078, YES);
     text(@"SESSION", NSMakeRect(26, 114, 174, 18), 10, NSFontWeightSemibold, 0x83867D, YES);
     text(@"Drop a ROM anywhere to begin.", NSMakeRect(26, 192, 178, 32), 11,
          NSFontWeightRegular, 0x747B72, NO);
@@ -238,8 +236,10 @@ static void timer_tick(Chip8 *chip8, void *userdata) {
             NSFontAttributeName:[NSFont systemFontOfSize:12 weight:NSFontWeightMedium],
             NSForegroundColorAttributeName:color(0xDCE8DA), NSParagraphStyleAttributeName:center}];
     }
-    text(c.fault ?: (c.audioAvailable ? @"Pixel perfect. Sound on your terms." : @"Audio unavailable — visual playback is ready."),
-         NSMakeRect(254, h - 34, w - 450, 18), 10, NSFontWeightRegular, 0x7A8276, NO);
+    if (c.fault || !c.audioAvailable) {
+        text(c.fault ?: @"Audio unavailable",
+             NSMakeRect(254, h - 34, w - 450, 18), 10, NSFontWeightRegular, 0x7A8276, NO);
+    }
     text(@"60 HZ TIMERS", NSMakeRect(w - 146, h - 34, 120, 18), 9,
          NSFontWeightMedium, 0x87907F, YES);
 }
@@ -537,3 +537,4 @@ int main(int argc, const char **argv) {
     }
     return snapshotStatus;
 }
+
