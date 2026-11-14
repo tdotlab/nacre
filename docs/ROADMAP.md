@@ -36,9 +36,9 @@ known unsupported extension encodings should eventually produce clear errors.
 
 ## Design follow-through
 
-Refine the Mac interface using actual play feedback. The current shell artwork is
-drawn in code and used for the running app's Dock icon; a bundled Finder icon and
-final brand assets remain to be made. Native buttons have accessibility labels;
+Refine the Mac interface using actual play feedback. The original shell artwork is
+drawn in code and used for the running app's Dock icon and generated Finder icon.
+Both use the same source in `src/macos/branding.h`. Native buttons have accessibility labels;
 full VoiceOver coverage of the custom display/key guide remains open.
 Adapt the design to Windows with the same core APIs. Choose the Windows UI toolkit
 for accessible controls before copying custom drawing. Linux packaging follows

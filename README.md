@@ -73,9 +73,9 @@ Restart uses the loaded bytes, so it still works if the original file was moved.
 | CHIP-8 keypad | `1–4`, `QWER`, `ASDF`, `ZXCV` | Same |
 | Pause / resume | `Space` or `⌘P` | `Space` |
 | Restart ROM | `⌘R` or `F2` | `F2` |
-| Sound | `M` or `⌘M` | `M` |
+| Sound | `M` | `M` |
 | Open ROM | `⌘O` | `Ctrl+O` |
-| Full screen | View menu / `⌘F` | Window manager |
+| Full screen | View menu / `⌃⌘F` | Window manager |
 | Quit | `⌘Q` | `Ctrl+Q` / `Esc` |
 
 The [Desktop builds workflow](https://github.com/tdotlab/nacre/actions/workflows/desktop.yml)

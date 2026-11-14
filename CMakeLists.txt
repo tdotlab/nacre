@@ -46,6 +46,16 @@ target_link_libraries(nacre-desktop PRIVATE nacre_core SDL3::SDL3)
 set_target_properties(nacre-desktop PROPERTIES OUTPUT_NAME Nacre)
 
 if(APPLE)
+    add_executable(nacre-icon EXCLUDE_FROM_ALL tools/macos-icon.m)
+    target_compile_options(nacre-icon PRIVATE -fobjc-arc)
+    target_link_libraries(nacre-icon PRIVATE "-framework Cocoa")
+    set(NACRE_ICON "${CMAKE_CURRENT_BINARY_DIR}/Nacre.icns")
+    add_custom_command(OUTPUT "${NACRE_ICON}"
+        COMMAND nacre-icon "${NACRE_ICON}"
+        DEPENDS nacre-icon src/macos/branding.h tools/macos-icon.m
+        VERBATIM)
+    set_source_files_properties("${NACRE_ICON}" PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+    target_sources(nacre-desktop PRIVATE "${NACRE_ICON}")
     set_target_properties(nacre-desktop PROPERTIES
         MACOSX_BUNDLE TRUE
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/src/macos/Info.plist.in"

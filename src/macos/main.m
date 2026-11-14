@@ -1,4 +1,5 @@
 #import <Cocoa/Cocoa.h>
+#import "branding.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include <SDL3/SDL.h>
 #include "chip8.h"
@@ -400,10 +401,18 @@ static void timer_tick(Chip8 *chip8, void *userdata) {
     session.submenu = [[NSMenu alloc] initWithTitle:@"Session"];
     [self addMenu:session.submenu title:@"Pause / Resume" action:@selector(togglePause:) key:@"p"];
     [self addMenu:session.submenu title:@"Restart ROM" action:@selector(resetROM:) key:@"r"];
-    [self addMenu:session.submenu title:@"Toggle Sound" action:@selector(toggleSound:) key:@"m"];
+    [self addMenu:session.submenu title:@"Toggle Sound" action:@selector(toggleSound:) key:@""];
     NSMenuItem *view = [bar addItemWithTitle:@"View" action:NULL keyEquivalent:@""];
     view.submenu = [[NSMenu alloc] initWithTitle:@"View"];
     [self addMenu:view.submenu title:@"Toggle Full Screen" action:@selector(fullscreen:) key:@"f"];
+    view.submenu.itemArray.lastObject.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagControl;
+    NSMenuItem *window = [bar addItemWithTitle:@"Window" action:NULL keyEquivalent:@""];
+    window.submenu = [[NSMenu alloc] initWithTitle:@"Window"];
+    [window.submenu addItemWithTitle:@"Minimize" action:@selector(performMiniaturize:) keyEquivalent:@"m"];
+    [window.submenu addItemWithTitle:@"Zoom" action:@selector(performZoom:) keyEquivalent:@""];
+    NSApp.windowsMenu = window.submenu;
+    [file.submenu addItem:NSMenuItem.separatorItem];
+    [file.submenu addItemWithTitle:@"Close Window" action:@selector(performClose:) keyEquivalent:@"w"];
 }
 - (void)menuNeedsUpdate:(NSMenu *)menu {
     [menu removeAllItems];
@@ -471,21 +480,7 @@ static void timer_tick(Chip8 *chip8, void *userdata) {
     audio.stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, audio_callback, &audio);
     self.audioAvailable = audio.stream && SDL_ResumeAudioStreamDevice(audio.stream);
     self.view.needsLayout = YES;
-    NSImage *icon = [[NSImage alloc] initWithSize:NSMakeSize(512, 512)];
-    [icon lockFocus];
-    fill(NSMakeRect(28, 28, 456, 456), 0xE8E7DA, 100);
-    fill(NSMakeRect(52, 52, 408, 408), 0x243E32, 82);
-    [color(0xCDDDC7) setStroke];
-    for (int i = 0; i < 5; i++) {
-        NSBezierPath *shell = [NSBezierPath bezierPath]; shell.lineWidth = 10;
-        shell.lineCapStyle = NSRoundLineCapStyle;
-        [shell moveToPoint:NSMakePoint(142 + i * 31, 146)];
-        [shell curveToPoint:NSMakePoint(358, 330 - i * 29)
-            controlPoint1:NSMakePoint(90 + i * 43, 380)
-            controlPoint2:NSMakePoint(377, 407 - i * 26)];
-        [shell stroke];
-    }
-    [icon unlockFocus]; NSApp.applicationIconImage = icon;
+    NSApp.applicationIconImage = NacreIcon();
     [self buildMenus]; [self.window center]; [self.window makeKeyAndOrderFront:nil];
     [self.window makeFirstResponder:self.view]; [NSApp activateIgnoringOtherApps:YES];
     if (self.pendingURL) { [self loadURL:self.pendingURL]; self.pendingURL = nil; }
