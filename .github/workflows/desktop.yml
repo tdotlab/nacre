@@ -46,6 +46,11 @@ jobs:
             libxcursor-dev libxext-dev libxfixes-dev libxi-dev \
             libxinerama-dev libxkbcommon-dev libxrandr-dev libxrender-dev \
             libxss-dev libxtst-dev
+      - name: Core and welcome ROM checks
+        if: runner.os == 'Linux'
+        run: |
+          make test
+          python3 tools/build-demo.py --check
       - name: Configure macOS universal build
         if: runner.os == 'macOS'
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release '-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64' -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
@@ -60,6 +65,7 @@ jobs:
           mkdir -p build/artifact
           ditto build/Nacre.app build/artifact/Nacre.app
       - name: Launch Mac app and capture interface
+        timeout-minutes: 2
         if: runner.os == 'macOS'
         run: build/Nacre.app/Contents/MacOS/Nacre --snapshot build/artifact/Nacre-preview.png
       - name: Upload app

@@ -1,11 +1,12 @@
 # Project guidance
 
-Nacre is a C CHIP-8 emulator with terminal/headless and SDL3 desktop frontends.
-The desktop frontend is shared across macOS, Windows, and Linux; keep OS-specific
-packaging outside the emulator core. Keep `chip8_*` and `CHIP8_*` identifiers for
+Nacre has a shared C CHIP-8 core, an AppKit Mac interface, a portable SDL3
+frontend for Windows/Linux, and a terminal/headless frontend. Keep OS-specific
+interface and packaging code outside the emulator core. Keep `chip8_*` and `CHIP8_*` identifiers for
 the emulated architecture; use Nacre for product branding.
 
 - Read README.md for current setup, commands, and entry points.
+- Read docs/ARCHITECTURE.md for the source map and frontend boundaries.
 - Read docs/ROADMAP.md for the desktop design, review findings, milestones, and open decisions.
 - Keep the emulator core independent of SDL, terminal APIs, and desktop UI code.
 - Retain the CLI while adding a desktop frontend. Implement one bounded milestone at a time.

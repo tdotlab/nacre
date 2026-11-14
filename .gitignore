@@ -7,3 +7,5 @@
 /roms
 /.roms-cache
 *.wav
+
+tests/test_demo

@@ -29,11 +29,15 @@ tests/test_scheduler: tests/test_scheduler.c src/chip8.c src/scheduler.c include
 tests/test_core: tests/test_core.c src/chip8.c include/chip8.h
 	$(CC) -Iinclude $(CFLAGS) -o $@ tests/test_core.c src/chip8.c
 
-test: tests/test_scheduler tests/test_core
+tests/test_demo: tests/test_demo.c src/chip8.c src/scheduler.c include/chip8.h include/scheduler.h assets/roms/nacre.ch8
+	$(CC) -Iinclude $(CFLAGS) -o $@ tests/test_demo.c src/chip8.c src/scheduler.c
+
+test: tests/test_scheduler tests/test_core tests/test_demo
 	./tests/test_scheduler
 	./tests/test_core
+	./tests/test_demo
 
 clean:
-	rm -f $(TARGET) tests/test_scheduler tests/test_core
+	rm -f $(TARGET) tests/test_scheduler tests/test_core tests/test_demo
 
 .PHONY: all clean test

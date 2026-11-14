@@ -73,6 +73,7 @@ static int chip_key(unsigned short code) {
 @property(nonatomic, strong) NacreView *view;
 @property(nonatomic, strong) NSTimer *timer;
 @property(nonatomic, strong) NSURL *romURL;
+@property(nonatomic, strong) NSURL *pendingURL;
 @property(nonatomic, strong) NSData *romData;
 @property(nonatomic, strong) NSString *fault;
 @property(nonatomic) BOOL userPaused;
@@ -100,6 +101,12 @@ static int chip_key(unsigned short code) {
 - (void)releaseKeys;
 - (void)updateControls;
 @end
+
+static void timer_tick(Chip8 *chip8, void *userdata) {
+    (void)chip8;
+    NacreController *controller = (__bridge NacreController *)userdata;
+    [controller syncAudio];
+}
 
 @implementation NacreView
 - (BOOL)isFlipped { return YES; }
@@ -199,8 +206,9 @@ static int chip_key(unsigned short code) {
          NSFontWeightMedium, 0x878C80, YES);
 
     NSString *name = c.romURL ? c.romURL.lastPathComponent.stringByDeletingPathExtension : @"Your next little world";
+    if ([c.romURL.path hasPrefix:NSBundle.mainBundle.resourcePath]) name = @"Welcome to Nacre";
     text(name, NSMakeRect(254, 27, w - 430, 32), 23, NSFontWeightSemibold, 0x293D34, NO);
-    text(c.romURL ? @"CHIP-8 ROM" : @"Open a ROM or try the bundled demo", NSMakeRect(255, 63, w - 400, 18),
+    text([c.romURL.path hasPrefix:NSBundle.mainBundle.resourcePath] ? @"PRESS A KEYPAD KEY TO SAY HELLO" : @"CHIP-8 ROM", NSMakeRect(255, 63, w - 400, 18),
          10, NSFontWeightMedium, 0x7B8479, YES);
     BOOL paused = [c paused];
     fill(NSMakeRect(w - 133, 42, 6, 6), c.fault ? 0xB66C52 : paused ? 0xB09361 : 0x608C70, 3);
@@ -291,7 +299,8 @@ static int chip_key(unsigned short code) {
     machine = candidate; self.romURL = url; self.romData = data; self.fault = nil;
     chip8_scheduler_init(&scheduler, (uint32_t)self.speedButton.selectedItem.tag);
     self.userPaused = NO; self.previous = SDL_GetTicksNS();
-    [NSDocumentController.sharedDocumentController noteNewRecentDocumentURL:url];
+    if (![url.path hasPrefix:NSBundle.mainBundle.resourcePath])
+        [NSDocumentController.sharedDocumentController noteNewRecentDocumentURL:url];
     [self.window makeFirstResponder:self.view]; [self syncAudio]; [self updateControls];
 }
 - (void)openROM:(id)sender {
@@ -340,7 +349,7 @@ static int chip_key(unsigned short code) {
     [self.window makeFirstResponder:self.view];
 }
 - (void)demo:(id)sender {
-    (void)sender; NSURL *url = [NSBundle.mainBundle URLForResource:@"hello" withExtension:@"ch8"];
+    (void)sender; NSURL *url = [NSBundle.mainBundle URLForResource:@"nacre" withExtension:@"ch8"];
     if (url) [self loadURL:url];
 }
 - (void)tick:(NSTimer *)timer {
@@ -348,7 +357,7 @@ static int chip_key(unsigned short code) {
     uint64_t now = SDL_GetTicksNS(), elapsed = now - self.previous; self.previous = now;
     char error[256];
     if (!chip8_scheduler_advance(&machine, &scheduler, elapsed, [self paused],
-                               NULL, NULL, error, sizeof(error))) {
+                               timer_tick, (__bridge void *)self, error, sizeof(error))) {
         self.fault = [NSString stringWithUTF8String:error]; [self releaseKeys];
         [self alert:self.fault]; [self updateControls];
     }
@@ -363,8 +372,10 @@ static int chip_key(unsigned short code) {
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender { (void)sender; return YES; }
 - (BOOL)application:(NSApplication *)sender openFile:(NSString *)filename {
     (void)sender;
-    if (!self.window) return NO;
-    [self loadURL:[NSURL fileURLWithPath:filename]]; return YES;
+    NSURL *url = [NSURL fileURLWithPath:filename];
+    if (!self.window) self.pendingURL = url;
+    else [self loadURL:url];
+    return YES;
 }
 - (void)addMenu:(NSMenu *)menu title:(NSString *)title action:(SEL)action key:(NSString *)key {
     NSMenuItem *item = [menu addItemWithTitle:title action:action keyEquivalent:key]; item.target = self;
@@ -459,15 +470,52 @@ static int chip_key(unsigned short code) {
     SDL_AudioSpec spec = {SDL_AUDIO_S16, 1, CHIP8_AUDIO_SAMPLE_RATE};
     audio.stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, audio_callback, &audio);
     self.audioAvailable = audio.stream && SDL_ResumeAudioStreamDevice(audio.stream);
+    self.view.needsLayout = YES;
+    NSImage *icon = [[NSImage alloc] initWithSize:NSMakeSize(512, 512)];
+    [icon lockFocus];
+    fill(NSMakeRect(28, 28, 456, 456), 0xE8E7DA, 100);
+    fill(NSMakeRect(52, 52, 408, 408), 0x243E32, 82);
+    [color(0xCDDDC7) setStroke];
+    for (int i = 0; i < 5; i++) {
+        NSBezierPath *shell = [NSBezierPath bezierPath]; shell.lineWidth = 10;
+        shell.lineCapStyle = NSRoundLineCapStyle;
+        [shell moveToPoint:NSMakePoint(142 + i * 31, 146)];
+        [shell curveToPoint:NSMakePoint(358, 330 - i * 29)
+            controlPoint1:NSMakePoint(90 + i * 43, 380)
+            controlPoint2:NSMakePoint(377, 407 - i * 26)];
+        [shell stroke];
+    }
+    [icon unlockFocus]; NSApp.applicationIconImage = icon;
     [self buildMenus]; [self.window center]; [self.window makeKeyAndOrderFront:nil];
     [self.window makeFirstResponder:self.view]; [NSApp activateIgnoringOtherApps:YES];
-    [self demo:nil]; [self updateControls];
+    if (self.pendingURL) { [self loadURL:self.pendingURL]; self.pendingURL = nil; }
+    else [self demo:nil];
+    [self updateControls];
     self.previous = SDL_GetTicksNS();
     self.timer = [NSTimer timerWithTimeInterval:1.0 / 60 target:self selector:@selector(tick:) userInfo:nil repeats:YES];
     [NSRunLoop.mainRunLoop addTimer:self.timer forMode:NSRunLoopCommonModes];
     if (snapshotPath) [self performSelector:@selector(captureSnapshot) withObject:nil afterDelay:0.5];
 }
 - (void)captureSnapshot {
+    /* Exercise native actions and physical keypad dispatch before rendering. */
+    BOOL originalMute = self.muted;
+    [self togglePause:nil];
+    if (!self.userPaused) { snapshotStatus = 2; [NSApp terminate:nil]; return; }
+    [self togglePause:nil];
+    [self toggleSound:nil]; [self toggleSound:nil];
+    if (self.muted != originalMute) { snapshotStatus = 3; [NSApp terminate:nil]; return; }
+    [self resetROM:nil];
+    if (!self.romData || self.fault) { snapshotStatus = 4; [NSApp terminate:nil]; return; }
+    self.focusPaused = NO;
+    NSEvent *down = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint
+        modifierFlags:0 timestamp:0 windowNumber:self.window.windowNumber context:nil
+        characters:@"x" charactersIgnoringModifiers:@"x" isARepeat:NO keyCode:7];
+    [self.view keyDown:down];
+    if (!machine.keys[0]) { snapshotStatus = 5; [NSApp terminate:nil]; return; }
+    [self.view keyUp:down];
+    if (machine.keys[0]) { snapshotStatus = 6; [NSApp terminate:nil]; return; }
+    char error[256];
+    chip8_scheduler_advance(&machine, &scheduler, 200000000, 0, NULL, NULL, error, sizeof(error));
     [self.view layoutSubtreeIfNeeded];
     [self.view displayIfNeeded];
     NSBitmapImageRep *bitmap = [self.view bitmapImageRepForCachingDisplayInRect:self.view.bounds];
@@ -489,7 +537,7 @@ int main(int argc, const char **argv) {
             snapshotPath = [NSString stringWithUTF8String:argv[2]];
         NSApplication *app = NSApplication.sharedApplication;
         [app setActivationPolicy:NSApplicationActivationPolicyRegular];
-        NacreController *controller = [NacreController new];
+        __attribute__((objc_precise_lifetime)) NacreController *controller = [NacreController new];
         app.delegate = controller; [app run];
     }
     return snapshotStatus;

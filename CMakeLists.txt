@@ -48,12 +48,13 @@ set_target_properties(nacre-desktop PROPERTIES OUTPUT_NAME Nacre)
 if(APPLE)
     set_target_properties(nacre-desktop PROPERTIES
         MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/src/macos/Info.plist.in"
         MACOSX_BUNDLE_BUNDLE_NAME Nacre
         MACOSX_BUNDLE_GUI_IDENTIFIER com.tdotlab.nacre
         MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION}
         MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION}
     )
-    set_source_files_properties(hello.ch8 PROPERTIES
+    set_source_files_properties(assets/roms/nacre.ch8 PROPERTIES
         HEADER_FILE_ONLY TRUE
         MACOSX_PACKAGE_LOCATION Resources
     )
@@ -61,7 +62,7 @@ if(APPLE)
         HEADER_FILE_ONLY TRUE
         MACOSX_PACKAGE_LOCATION Resources
     )
-    target_sources(nacre-desktop PRIVATE hello.ch8 "${SDL3_SOURCE_DIR}/LICENSE.txt")
+    target_sources(nacre-desktop PRIVATE assets/roms/nacre.ch8 "${SDL3_SOURCE_DIR}/LICENSE.txt")
 else()
     add_custom_command(TARGET nacre-desktop POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory
