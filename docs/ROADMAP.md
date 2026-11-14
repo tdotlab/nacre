@@ -13,8 +13,10 @@ menus, fullscreen, persisted settings, and a live physical-keyboard guide.
 The universal build targets macOS 11+. Its CI snapshot mode exercises pause,
 mute, restart, and keypad down/up, then captures the real view.
 
-Core/scheduler tests pass locally. CI builds each OS; Mac launch/snapshot results
-are recorded in the linked workflow run. Automated UI capture and compilation
+Core, scheduler, and original welcome-ROM tests pass locally and in Linux CI.
+The Mac interface build, native control/key smoke checks, and capture passed in
+[CI run 43649531447](https://github.com/tdotlab/nacre/actions/runs/43649531447);
+Windows and Linux builds also passed. Automated UI capture and compilation
 are separate from hands-on input/audio acceptance. Live sound still needs a
 listening check on real devices. Windows/Linux visual parity is not implemented.
 

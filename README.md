@@ -2,16 +2,9 @@
 
 A compact CHIP-8 interpreter with a native Mac app, a portable SDL3 frontend, and a terminal interface. All three use the same C emulator core and sound oscillator.
 
-![IBM Logo](screenshots/ibm-logo.png)
-*IBM Logo — the classic first test.*
+![Nacre Mac interface](screenshots/nacre-macos.png)
 
-![Tetris](screenshots/tetris.png)
-*Tetris — a piece falling into the well.*
-
-![Breakout](screenshots/breakout.png)
-*Breakout — bricks and paddle, waiting for serve.*
-
-These images show the emulator's framebuffer as PNGs.
+*The actual AppKit interface, captured by the Mac CI runner.*
 
 ## Build and play
 
