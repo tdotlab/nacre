@@ -318,7 +318,7 @@ static int render_frame(App *app) {
 }
 
 static char *default_rom_path(void) {
-    char *base = SDL_GetBasePath();
+    const char *base = SDL_GetBasePath();
     if (!base) return NULL;
     char *path = NULL;
 #ifdef __APPLE__
@@ -326,7 +326,6 @@ static char *default_rom_path(void) {
 #else
     SDL_asprintf(&path, "%sassets/hello.ch8", base);
 #endif
-    SDL_free(base);
     return path;
 }
 

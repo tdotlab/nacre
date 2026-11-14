@@ -48,7 +48,7 @@ jobs:
             libxss-dev libxtst-dev
       - name: Configure macOS universal build
         if: runner.os == 'macOS'
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release '-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64'
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release '-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64' -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
       - name: Configure
         if: runner.os != 'macOS'
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -59,6 +59,9 @@ jobs:
         run: |
           mkdir -p build/artifact
           ditto build/Nacre.app build/artifact/Nacre.app
+      - name: Launch Mac app and capture interface
+        if: runner.os == 'macOS'
+        run: build/Nacre.app/Contents/MacOS/Nacre --snapshot build/artifact/Nacre-preview.png
       - name: Upload app
         uses: actions/upload-artifact@v4
         with:

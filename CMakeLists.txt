@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
-project(Nacre VERSION 0.1.0 LANGUAGES C)
+project(Nacre VERSION 0.2.0 LANGUAGES C)
+if(APPLE)
+    enable_language(OBJC)
+endif()
 
 include(FetchContent)
 
@@ -30,7 +33,11 @@ if(UNIX)
     target_link_libraries(nacre_core PUBLIC m)
 endif()
 
-if(WIN32)
+if(APPLE)
+    add_executable(nacre-desktop MACOSX_BUNDLE src/macos/main.m)
+    target_compile_options(nacre-desktop PRIVATE -fobjc-arc)
+    target_link_libraries(nacre-desktop PRIVATE "-framework Cocoa" "-framework UniformTypeIdentifiers")
+elseif(WIN32)
     add_executable(nacre-desktop WIN32 src/desktop/main.c)
 else()
     add_executable(nacre-desktop src/desktop/main.c)
@@ -43,6 +50,8 @@ if(APPLE)
         MACOSX_BUNDLE TRUE
         MACOSX_BUNDLE_BUNDLE_NAME Nacre
         MACOSX_BUNDLE_GUI_IDENTIFIER com.tdotlab.nacre
+        MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION}
+        MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION}
     )
     set_source_files_properties(hello.ch8 PROPERTIES
         HEADER_FILE_ONLY TRUE
