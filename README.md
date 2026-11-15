@@ -1,6 +1,6 @@
 # Nacre
 
-A compact CHIP-8 interpreter with native Mac and Windows apps, a portable SDL3 frontend for Linux, and a terminal interface. All of them use the same C emulator core and sound oscillator. A Game Boy (DMG) core sits alongside it; the Windows and Linux frontends play Game Boy cartridges, and the Mac app is next. See [Game Boy core](#game-boy-core).
+A compact CHIP-8 interpreter with native Mac and Windows apps, a portable SDL3 frontend for Linux, and a terminal interface. All of them use the same C emulator core and sound oscillator. A Game Boy (DMG) core sits alongside it, and all three desktop frontends play Game Boy cartridges. See [Game Boy core](#game-boy-core).
 
 ![Nacre Mac interface](screenshots/nacre-macos.png)
 
@@ -73,8 +73,8 @@ bytes, so it still works if the original file was moved.
 | Action | Mac | Windows | SDL frontend (Linux) |
 | --- | --- | --- | --- |
 | CHIP-8 keypad | `1–4`, `QWER`, `ASDF`, `ZXCV` | Same (by physical key position) | Same |
-| Game Boy buttons | Not yet | Arrows, `X` = A, `Z` = B, `Enter` = Start, `Backspace` or right `Shift` = Select | Same |
-| Game Boy speed / palette | Not yet | Sidebar or Session/View menus | `F3` / `F4` (shown in the title bar) |
+| Game Boy buttons | Arrows, `X` = A, `Z` = B, `Return` = Start, `Delete` or right `Shift` = Select | Arrows, `X` = A, `Z` = B, `Enter` = Start, `Backspace` or right `Shift` = Select | Same |
+| Game Boy speed / palette | Sidebar popups | Sidebar or Session/View menus | `F3` / `F4` (shown in the title bar) |
 | Pause / resume | `Space` or `⌘P` | `Space` or `Ctrl+P` | `Space` |
 | Restart ROM | `⌘R` or `F2` | `Ctrl+R` or `F2` | `F2` |
 | Sound | `M` | `M` | `M` |
@@ -85,7 +85,9 @@ bytes, so it still works if the original file was moved.
 The [Desktop builds workflow](https://github.com/tdotlab/nacre/actions/workflows/desktop.yml)
 uploads unsigned artifacts. Mac CI targets macOS 11+ with both Intel and Apple
 Silicon architectures. It also launches the AppKit app, exercises basic controls
-and key dispatch, and captures the actual interface as `Nacre-preview.png`.
+and key dispatch, runs the Game Boy key and frame path on a stand-in cartridge
+(captured as `Nacre-preview-gb.png`), and captures the actual interface as
+`Nacre-preview.png`.
 These automated checks do not establish audible output or real MacBook acceptance.
 The preview is unsigned and unnotarized. A normal downloadable release still needs
 signing and notarization.
@@ -174,6 +176,12 @@ on loading another ROM, and on exit. Each write goes to a temporary file first a
 then replaces the old save. A `.sav` that doesn't fit the cartridge is left
 untouched. `Nacre.exe ROM --seconds N --snapshot out.png` runs a cartridge for N
 seconds and captures the window.
+
+The Mac app does the same in its own design: the same keys (`Return` for Start,
+`Delete` or right `Shift` for Select), `.sav` handling and stereo sound, and it
+accepts `.gb`/`.gbc` from Open, Finder, recent files and drag and drop. Its speed
+and palette popups keep separate choices for CHIP-8 and Game Boy.
+`Nacre.app/Contents/MacOS/Nacre ROM --seconds N --snapshot out.png` works as on Windows.
 
 The Linux SDL frontend does the same in its plainer window: the same keys, the
 same `.sav` handling, stereo sound, and integer-scaled four-shade output. `F3`

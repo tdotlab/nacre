@@ -68,8 +68,16 @@ The Linux SDL frontend (`src/desktop/main.c`) has the same Game Boy support, wit
 `F3`/`F4` for speed and palette. CI compiles it with GCC, but nobody has run it
 yet, since CI does not launch it.
 
-Still to do for step 5: the Mac app (`src/macos/main.m`, verifiable here only
-through CI).
+The Mac app (`src/macos/main.m`) has the same Game Boy support: arrows, X/Z,
+Return, Delete or right Shift, separate CHIP-8 and Game Boy speed choices, stereo
+audio and `.sav` files, with `.gb`/`.gbc` registered as document types. It was
+built and checked only through CI. The snapshot drives the Game Boy key and frame
+path on a stand-in cartridge that draws a corner block, and the captured
+`Nacre-preview-gb.png` shows the screen the right way up with its keycaps. Nobody
+has run it on a real Mac, played a game on it, or heard its audio.
+
+Step 5 is therefore complete in code on all three frontends. Hands-on checks
+remain: audio by ear, real key play, and a save surviving a relaunch, on each OS.
 
 Known gaps for step 6:
 

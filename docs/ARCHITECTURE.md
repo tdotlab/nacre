@@ -15,7 +15,7 @@ audio devices.
 | `src/gb/gb_apu.c` | Four channels, frame sequencer, 48 kHz stereo mix |
 | `src/gb/gb_cart.c` | Header checks, MBC1/2/3/5, RTC, `.sav` format |
 | `tests/test_gb.c`, `tools/get-gb-test-roms.py` | ROM-driven core checks; headless run/dump/press tool |
-| `src/macos/main.m` | ARC-managed AppKit app, native menus/panels, display, controls, SDL3 audio |
+| `src/macos/main.m` | ARC-managed AppKit app, native menus/panels, display, controls, SDL3 audio, Game Boy display/keys/`.sav` |
 | `src/macos/Info.plist.in` | Mac identity, version, document associations, OS requirement |
 | `src/windows/main.cpp` | Win32 + GDI+ app: window, owner-drawn controls, menus, dialogs, drop target, registry prefs, SDL3 audio, Game Boy display/keys/`.sav` |
 | `src/windows/branding.h` | Shell mark and icon geometry (same shapes as the Mac header), shared by the app and the icon tool |
@@ -65,10 +65,12 @@ feeds real time to the MBC3 clock, which then catches up when a save is loaded.
 `gb_advance_ns` turns wall time into cycles at a speed percentage and carries the
 fractional cycle, so a frontend calls it once per UI tick and stays exact over
 long runs. Each frontend picks the core from the ROM's header
-(`gb_rom_looks_valid`), not its extension. The Windows shell keeps both machines
-alive and switches between them. It writes `.sav` files a second after the cart
-goes dirty, and on restart, load and exit, through a temporary file and
-`MoveFileEx`. Game Boy audio is pushed into its own SDL3 stream: stereo, no
+(`gb_rom_looks_valid`), not its extension. Each shell keeps both machines alive
+and switches between them. They write `.sav` files a second after the cart goes
+dirty, and on restart, load and exit, through a temporary file and an atomic
+rename (`MoveFileEx` on Windows, `NSDataWritingAtomic` on Mac, `SDL_RenamePath`
+on Linux). The Mac draws the 160×144 frame through a CGBitmapContext image with
+interpolation off, flipped for its top-left view coordinates. Game Boy audio is pushed into its own SDL3 stream: stereo, no
 callback, 48 kHz, resampled for 0.5×/2×. The queue is held between about 40 and
 150 ms, padding with silence when it runs short and dropping a batch when it
 runs long.
