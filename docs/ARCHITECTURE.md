@@ -21,7 +21,7 @@ audio devices.
 | `src/windows/branding.h` | Shell mark and icon geometry (same shapes as the Mac header), shared by the app and the icon tool |
 | `src/windows/nacre.rc.in`, `nacre.manifest` | Embedded icon and welcome ROM, version info; comctl32 v6, PerMonitorV2 DPI |
 | `tools/windows-icon.cpp` | Build-time generator of `Nacre.ico` (PNG frames, 16–256 px) |
-| `src/desktop/main.c` | SDL3 window/input/file picker/audio for Linux |
+| `src/desktop/main.c` | SDL3 window/input/file picker/drop/audio for Linux, CHIP-8 and Game Boy |
 | `src/main.c` | Terminal and headless CLI |
 | `CMakeLists.txt` | Platform selection, static SDL3, bundle/resources, Windows icon/rc/manifest |
 | `.github/workflows/desktop.yml` | OS builds, universal Mac artifact, native UI smoke capture on Mac and Windows |

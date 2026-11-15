@@ -1,6 +1,6 @@
 # Nacre
 
-A compact CHIP-8 interpreter with native Mac and Windows apps, a portable SDL3 frontend for Linux, and a terminal interface. All of them use the same C emulator core and sound oscillator. A Game Boy (DMG) core sits alongside it; the Windows app already plays Game Boy cartridges, and the Mac and Linux frontends are next. See [Game Boy core](#game-boy-core).
+A compact CHIP-8 interpreter with native Mac and Windows apps, a portable SDL3 frontend for Linux, and a terminal interface. All of them use the same C emulator core and sound oscillator. A Game Boy (DMG) core sits alongside it; the Windows and Linux frontends play Game Boy cartridges, and the Mac app is next. See [Game Boy core](#game-boy-core).
 
 ![Nacre Mac interface](screenshots/nacre-macos.png)
 
@@ -73,7 +73,8 @@ bytes, so it still works if the original file was moved.
 | Action | Mac | Windows | SDL frontend (Linux) |
 | --- | --- | --- | --- |
 | CHIP-8 keypad | `1–4`, `QWER`, `ASDF`, `ZXCV` | Same (by physical key position) | Same |
-| Game Boy buttons | Not yet | Arrows, `X` = A, `Z` = B, `Enter` = Start, `Backspace` or right `Shift` = Select | Not yet |
+| Game Boy buttons | Not yet | Arrows, `X` = A, `Z` = B, `Enter` = Start, `Backspace` or right `Shift` = Select | Same |
+| Game Boy speed / palette | Not yet | Sidebar or Session/View menus | `F3` / `F4` (shown in the title bar) |
 | Pause / resume | `Space` or `⌘P` | `Space` or `Ctrl+P` | `Space` |
 | Restart ROM | `⌘R` or `F2` | `Ctrl+R` or `F2` | `F2` |
 | Sound | `M` | `M` | `M` |
@@ -173,6 +174,10 @@ on loading another ROM, and on exit. Each write goes to a temporary file first a
 then replaces the old save. A `.sav` that doesn't fit the cartridge is left
 untouched. `Nacre.exe ROM --seconds N --snapshot out.png` runs a cartridge for N
 seconds and captures the window.
+
+The Linux SDL frontend does the same in its plainer window: the same keys, the
+same `.sav` handling, stereo sound, and integer-scaled four-shade output. `F3`
+cycles the speed and `F4` the palette, and you can also drop a file onto the window.
 
 The core is checked against public test ROMs, which are fetched into the ignored cache and never committed:
 

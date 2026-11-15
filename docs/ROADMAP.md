@@ -64,8 +64,12 @@ rendering correctly.
 Not yet checked by a person: hearing the audio, playing with real key input,
 and a save surviving an exit and relaunch.
 
-Still to do for step 5: the Linux SDL frontend (`src/desktop/main.c`) and the Mac
-app (`src/macos/main.m`, verifiable here only through CI).
+The Linux SDL frontend (`src/desktop/main.c`) has the same Game Boy support, with
+`F3`/`F4` for speed and palette. CI compiles it with GCC, but nobody has run it
+yet, since CI does not launch it.
+
+Still to do for step 5: the Mac app (`src/macos/main.m`, verifiable here only
+through CI).
 
 Known gaps for step 6:
 
