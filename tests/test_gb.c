@@ -380,6 +380,147 @@ static int builtin_checks(void) {
     return failures;
 }
 
+/* A load legitimately resets the audio queue and flags the save dirty, so those
+ * bytes are masked before two states are compared. */
+static void mask_volatile(uint8_t *blob) {
+    const size_t header = 20;
+    memset(blob + header + offsetof(Gb, apu.buffer), 0, sizeof ((Gb *)0)->apu.buffer);
+    memset(blob + header + offsetof(Gb, apu.read_pos), 0, sizeof ((Gb *)0)->apu.read_pos);
+    memset(blob + header + offsetof(Gb, apu.write_pos), 0, sizeof ((Gb *)0)->apu.write_pos);
+    memset(blob + header + offsetof(Gb, cart.dirty), 0, sizeof ((Gb *)0)->cart.dirty);
+}
+
+/* Save states: restoring a snapshot and running on must land in exactly the
+ * state the original machine reached, and a bad state must change nothing. */
+static int state_roundtrip(const char *name, const uint8_t *rom, size_t length, uint32_t warmup, uint32_t tail) {
+    char error[160];
+    int failures = 0;
+    Gb *a = gb_create();
+    Gb *b = gb_create();
+    size_t size;
+    uint8_t *snap = NULL, *end_a = NULL, *end_b = NULL, *probe = NULL;
+
+    if (!gb_load_rom(a, rom, length, error, sizeof error) || !gb_load_rom(b, rom, length, error, sizeof error)) {
+        printf("FAIL state %s: load: %s\n", name, error);
+        gb_destroy(a);
+        gb_destroy(b);
+        return 1;
+    }
+    size = gb_state_size(a);
+    snap = (uint8_t *)malloc(size);
+    end_a = (uint8_t *)malloc(size);
+    end_b = (uint8_t *)malloc(size);
+    probe = (uint8_t *)malloc(size);
+    if (!size || !snap || !end_a || !end_b || !probe) {
+        printf("FAIL state %s: allocation or zero size\n", name);
+        failures++;
+        goto done;
+    }
+
+    if (!gb_run_cycles(a, warmup, error, sizeof error) || gb_state_save(a, snap, size) != size) {
+        printf("FAIL state %s: warmup or save (%s)\n", name, error);
+        failures++;
+        goto done;
+    }
+    if (gb_state_save(a, probe, size - 1) != 0) { printf("FAIL state %s: short buffer accepted\n", name); failures++; }
+
+    /* The original machine keeps running; its end state is the reference. */
+    gb_run_cycles(a, tail, error, sizeof error);
+    gb_state_save(a, end_a, size);
+    mask_volatile(end_a);
+
+    /* Same machine, rewound. */
+    if (!gb_state_load(a, snap, size)) { printf("FAIL state %s: load refused\n", name); failures++; goto done; }
+    gb_run_cycles(a, tail, error, sizeof error);
+    gb_state_save(a, probe, size);
+    mask_volatile(probe);
+    if (memcmp(probe, end_a, size) != 0) { printf("FAIL state %s: rewound run diverged\n", name); failures++; }
+
+    /* A different machine with the same ROM, never run before. */
+    if (!gb_state_load(b, snap, size)) { printf("FAIL state %s: load into fresh machine refused\n", name); failures++; goto done; }
+    gb_run_cycles(b, tail, error, sizeof error);
+    gb_state_save(b, end_b, size);
+    mask_volatile(end_b);
+    if (memcmp(end_b, end_a, size) != 0) { printf("FAIL state %s: fresh-machine run diverged\n", name); failures++; }
+    if (memcmp(gb_framebuffer(a), gb_framebuffer(b), GB_SCREEN_WIDTH * GB_SCREEN_HEIGHT) != 0) {
+        printf("FAIL state %s: framebuffers differ\n", name);
+        failures++;
+    }
+
+    /* Rejected states change nothing. */
+    gb_state_save(b, probe, size);
+    {
+        uint8_t *bad = (uint8_t *)malloc(size);
+        if (bad) {
+            memcpy(bad, snap, size);
+            bad[0] ^= 0xFF; /* magic */
+            if (gb_state_load(b, bad, size)) { printf("FAIL state %s: bad magic accepted\n", name); failures++; }
+            memcpy(bad, snap, size);
+            bad[12] ^= 0x01; /* ROM identity */
+            if (gb_state_load(b, bad, size)) { printf("FAIL state %s: wrong-ROM state accepted\n", name); failures++; }
+            memcpy(bad, snap, size);
+            bad[8] ^= 0x01; /* struct size */
+            if (gb_state_load(b, bad, size)) { printf("FAIL state %s: wrong-layout state accepted\n", name); failures++; }
+            free(bad);
+        }
+        if (gb_state_load(b, snap, size - 1)) { printf("FAIL state %s: truncated state accepted\n", name); failures++; }
+        gb_state_save(b, end_b, size);
+        if (memcmp(probe, end_b, size) != 0) { printf("FAIL state %s: a rejected load changed the machine\n", name); failures++; }
+    }
+
+    /* Loading drops queued audio and flags the battery save for rewriting. */
+    if (gb_audio_available(a) != 0 && gb_state_load(a, snap, size) && gb_audio_available(a) != 0) {
+        printf("FAIL state %s: audio queue survived a load\n", name);
+        failures++;
+    }
+    if (!failures) printf("ok   state round trip: %s\n", name);
+done:
+    free(snap);
+    free(end_a);
+    free(end_b);
+    free(probe);
+    gb_destroy(a);
+    gb_destroy(b);
+    return failures;
+}
+
+static int state_checks(const char *dir) {
+    static uint8_t rom[0x8000];
+    static const uint8_t logo[48] = {
+        0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B, 0x03, 0x73, 0x00, 0x83, 0x00, 0x0C, 0x00, 0x0D,
+        0x00, 0x08, 0x11, 0x1F, 0x88, 0x89, 0x00, 0x0E, 0xDC, 0xCC, 0x6E, 0xE6, 0xDD, 0xDD, 0xD9, 0x99,
+        0xBB, 0xBB, 0x67, 0x63, 0x6E, 0x0E, 0xEC, 0xCC, 0xDD, 0xDC, 0x99, 0x9F, 0xBB, 0xB9, 0x33, 0x3E,
+    };
+    static const uint8_t program[] = {
+        0x3E, 0x0A, 0xEA, 0x00, 0x00, /* enable cartridge RAM */
+        0x04, 0x78,                   /* loop: INC B; LD A,B */
+        0xEA, 0x00, 0xA0,             /* LD ($A000),A: cartridge RAM */
+        0xEA, 0x00, 0xC0,             /* LD ($C000),A: work RAM */
+        0x18, 0xF6,                   /* JR loop */
+    };
+    char path[1024];
+    size_t length;
+    uint8_t *real;
+    int failures;
+
+    memcpy(rom + 0x104, logo, sizeof logo);
+    memcpy(rom + 0x134, "STATETEST", 9);
+    rom[0x147] = 0x13; /* MBC3 + RAM + battery */
+    rom[0x149] = 0x03;
+    rom[0x100] = 0xC3; rom[0x101] = 0x50; rom[0x102] = 0x01;
+    memcpy(rom + 0x150, program, sizeof program);
+    failures = state_roundtrip("synthetic MBC3 cart", rom, sizeof rom, 200000, 300000);
+
+    /* A real program exercises the PPU, timer, serial port and CPU mid-flight. */
+    snprintf(path, sizeof path, "%s/gb-test-roms/cpu_instrs/cpu_instrs.gb", dir);
+    real = read_file(path, &length);
+    if (real) {
+        failures += state_roundtrip("cpu_instrs", real, length, GB_CLOCK_HZ * 2, GB_CLOCK_HZ);
+        free(real);
+    }
+    return failures;
+}
+
 /* --press BUTTON:SECONDS holds a button (right, left, up, down, a, b, select, start)
  * for a tenth of a second starting at that time; repeat it for more presses. */
 typedef struct {
@@ -463,6 +604,7 @@ int main(int argc, char **argv) {
     if (argc > 2 && strcmp(argv[1], "--run") == 0) return run_single(argc, argv);
 
     failures = builtin_checks();
+    failures += state_checks(dir);
     for (i = 0; i < sizeof checks / sizeof checks[0]; i++) {
         char path[1024];
         char detail[512] = "";

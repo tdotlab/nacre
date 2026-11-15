@@ -75,6 +75,17 @@ void gb_save_mark_clean(Gb *gb);
 /* Unix seconds, used to advance the MBC3 clock across sessions; 0 leaves it frozen. */
 void gb_set_wall_clock(Gb *gb, int64_t unix_seconds);
 
+/* Save states: a snapshot of the whole running machine (CPU, memory, video,
+ * sound, cartridge RAM and mapper). `gb_state_size` is 0 with no ROM loaded.
+ * `gb_state_save` writes that many bytes and returns the count, or 0 on failure.
+ * `gb_state_load` returns 1 on success; a state from another game, another build
+ * or a truncated file is rejected and leaves the machine untouched. States are
+ * not portable between builds. Loading discards queued audio and marks the
+ * battery save dirty. */
+size_t gb_state_size(const Gb *gb);
+size_t gb_state_save(const Gb *gb, uint8_t *out, size_t capacity);
+int gb_state_load(Gb *gb, const uint8_t *data, size_t length);
+
 /* Bytes the program sent out of the link port (test ROMs print results here). */
 const char *gb_serial_output(const Gb *gb, size_t *length);
 

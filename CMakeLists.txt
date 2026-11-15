@@ -36,6 +36,7 @@ add_library(nacre_core STATIC
     src/gb/gb_ppu.c
     src/gb/gb_apu.c
     src/gb/gb_cart.c
+    src/gb/gb_state.c
 )
 target_include_directories(nacre_core PUBLIC include)
 target_compile_features(nacre_core PUBLIC c_std_99)

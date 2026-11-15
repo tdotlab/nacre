@@ -23,7 +23,7 @@ all: $(TARGET)
 $(TARGET): $(SOURCES) include/chip8.h include/audio.h include/scheduler.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $(SOURCES) $(LDLIBS) -lm
 
-GB_SOURCES = src/gb/gb.c src/gb/gb_cpu.c src/gb/gb_ppu.c src/gb/gb_apu.c src/gb/gb_cart.c
+GB_SOURCES = src/gb/gb.c src/gb/gb_cpu.c src/gb/gb_ppu.c src/gb/gb_apu.c src/gb/gb_cart.c src/gb/gb_state.c
 GB_HEADERS = include/gb.h src/gb/gb_internal.h
 
 tests/test_scheduler: tests/test_scheduler.c src/chip8.c src/scheduler.c include/chip8.h include/scheduler.h
