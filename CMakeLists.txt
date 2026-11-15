@@ -37,6 +37,7 @@ add_library(nacre_core STATIC
     src/gb/gb_apu.c
     src/gb/gb_cart.c
     src/gb/gb_state.c
+    src/gb_input.c
 )
 target_include_directories(nacre_core PUBLIC include)
 target_compile_features(nacre_core PUBLIC c_std_99)
@@ -58,6 +59,8 @@ elseif(WIN32)
 else()
     add_executable(nacre-desktop src/desktop/main.c)
 endif()
+# Controller input (SDL3 gamepads) is shared by all three desktop frontends.
+target_sources(nacre-desktop PRIVATE src/desktop/pad.c)
 target_link_libraries(nacre-desktop PRIVATE nacre_core SDL3::SDL3)
 set_target_properties(nacre-desktop PROPERTIES OUTPUT_NAME Nacre)
 

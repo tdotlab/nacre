@@ -27,7 +27,9 @@ extern "C" {
 #include "audio.h"
 #include "chip8.h"
 #include "gb.h"
+#include "gb_input.h"
 #include "scheduler.h"
+#include "../desktop/pad.h"
 }
 #include <SDL3/SDL.h>
 
@@ -53,10 +55,14 @@ enum {
     IDM_SOUND,
     IDM_FULLSCREEN,
     IDM_ABOUT,
+    IDM_SAVE_STATE,
+    IDM_LOAD_STATE,
+    IDM_CONTROLS,
     IDC_SPEED,
     IDC_PALETTE,
     IDM_SPEED_BASE = 300,   /* + index */
     IDM_PALETTE_BASE = 320, /* + index */
+    IDM_SLOT_BASE = 340,    /* + slot */
     IDM_RECENT_BASE = 400   /* + index */
 };
 const UINT WM_NACRE_LOAD = WM_APP + 1;     /* lParam: heap std::wstring* */
@@ -79,6 +85,8 @@ const uint32_t SPEED_HZ[3] = {300, 600, 1000};
 const wchar_t *const SPEED_NAME[3] = {L"Relaxed · 300 Hz", L"Original · 600 Hz",
                                       L"Quick · 1000 Hz"};
 const unsigned GB_SPEED_PERCENT[3] = {50, 100, 200};
+const unsigned GB_FAST_PERCENT = 400; /* while the fast-forward key is held */
+const int GB_STATE_SLOTS = 4;
 const wchar_t *const GB_SPEED_NAME[3] = {L"Half · 0.5×", L"Normal · 1×", L"Double · 2×"};
 const float SIDEBAR_W = 222.0f;
 const int CLIENT_W = 1120, CLIENT_H = 730, MIN_W = 920, MIN_H = 730;
@@ -94,7 +102,7 @@ struct Audio {
 struct App {
     HINSTANCE instance;
     HWND hwnd, open, pause, restart, sound, speed, palette_button, tooltips;
-    HMENU menu, recent_menu, session_menu, speed_menu, palette_menu;
+    HMENU menu, recent_menu, session_menu, speed_menu, palette_menu, slot_menu;
     HACCEL accel;
     HWND hover;
 
@@ -107,6 +115,13 @@ struct App {
     bool is_gb;
     int gb_speed;              /* index into GB_SPEED_PERCENT */
     bool gb_keys[GB_BUTTON_COUNT], shown_gb_keys[GB_BUTTON_COUNT];
+    bool gb_kb[GB_BUTTON_COUNT]; /* held on the keyboard; gb_keys is keyboard or controller */
+    GbBindings keys;             /* keyboard bindings, saved in the registry */
+    unsigned pad_held, pad_seen; /* controller actions held now and last tick */
+    bool ff_key, ff_on;          /* fast-forward key held; fast-forward running */
+    int slot;                    /* save-state slot, 0-based */
+    std::wstring status;         /* short-lived footer message */
+    uint64_t status_until;
     uint32_t gb_frame_seen;
     std::wstring save_path;    /* empty when the cartridge has no battery */
     std::wstring save_note;
@@ -199,6 +214,96 @@ void reg_set_dword(const wchar_t *name, DWORD value) {
     reg_set(name, REG_DWORD, &value, sizeof(value));
 }
 
+std::wstring reg_string(const wchar_t *name) {
+    wchar_t buffer[512];
+    DWORD size = sizeof(buffer);
+    if (RegGetValueW(HKEY_CURRENT_USER, REG_KEY, name, RRF_RT_REG_SZ, NULL, buffer, &size) ==
+        ERROR_SUCCESS)
+        return buffer;
+    return std::wstring();
+}
+
+void reg_set_string(const wchar_t *name, const std::wstring &value) {
+    reg_set(name, REG_SZ, value.c_str(), (DWORD)((value.size() + 1) * sizeof(wchar_t)));
+}
+
+/* ---- Game Boy keyboard bindings ----------------------------------------- */
+
+/* A key is its scan code (the physical position, whatever the layout), plus 0x100
+ * for the extended block: arrows, keypad Enter, right Ctrl and Alt. */
+int key_code(UINT scan, bool extended) { return (int)(scan & 0xFF) | (extended ? 0x100 : 0); }
+
+const int DEFAULT_KEYS[GBI_COUNT][GBI_KEYS_PER_ACTION] = {
+    {0x14D, 0x20},  /* Right: arrow, D */
+    {0x14B, 0x1E},  /* Left: arrow, A */
+    {0x148, 0x11},  /* Up: arrow, W */
+    {0x150, 0x1F},  /* Down: arrow, S */
+    {0x2D, 0x25},   /* A: X, K */
+    {0x2C, 0x24},   /* B: Z, J */
+    {0x0E, 0x36},   /* Select: Backspace, right Shift */
+    {0x1C, 0x11C},  /* Start: Enter, keypad Enter */
+    {0x0F, -1},     /* Fast-forward: Tab */
+    {0x3F, -1},     /* Save state: F5 */
+    {0x41, -1},     /* Load state: F7 */
+    {0x40, -1},     /* Next slot: F6 */
+};
+
+/* Keys the app itself uses (Esc, Space, M, F2, F10, F11, both Ctrl and Alt keys, the
+ * Windows and menu keys) cannot be bound to the game. */
+bool key_reserved(int code) {
+    switch (code) {
+    case 0x01: case 0x39: case 0x32: case 0x3C: case 0x44: case 0x57:
+    case 0x1D: case 0x11D: case 0x38: case 0x138: case 0x15B: case 0x15C: case 0x15D:
+        return true;
+    default:
+        return false;
+    }
+}
+
+std::wstring key_name(int code) {
+    if (code < 0) return L"\u2014";
+    LONG lparam = ((code & 0xFF) << 16) | ((code & 0x100) ? (1 << 24) : 0);
+    wchar_t name[64] = {};
+    if (GetKeyNameTextW(lparam, name, 64) > 0) return name;
+    wchar_t fallback[24];
+    swprintf(fallback, 24, L"Key %X", code);
+    return fallback;
+}
+
+/* "Save state\tF5", or just the name when nothing is bound. */
+std::wstring menu_label(const wchar_t *name, GbInput action) {
+    for (int slot = 0; slot < GBI_KEYS_PER_ACTION; slot++)
+        if (g.keys.key[action][slot] >= 0) return std::wstring(name) + L"\t" + key_name(g.keys.key[action][slot]);
+    return name;
+}
+
+/* The first key bound to an action, for hints and menu labels. */
+std::wstring action_key(GbInput action) {
+    for (int slot = 0; slot < GBI_KEYS_PER_ACTION; slot++)
+        if (g.keys.key[action][slot] >= 0) return key_name(g.keys.key[action][slot]);
+    return L"unbound";
+}
+
+void save_bindings() {
+    char text[256];
+    if (!gbi_serialize(&g.keys, text, sizeof(text))) return;
+    reg_set_string(L"gbBindings", widen(text));
+}
+
+void load_bindings() {
+    gbi_set_defaults(&g.keys, DEFAULT_KEYS);
+    if (g.ephemeral) return; /* the self-check runs on the defaults */
+    std::wstring stored = reg_string(L"gbBindings");
+    char text[256];
+    size_t length = 0;
+    for (; length < stored.size() && length + 1 < sizeof(text); length++) {
+        if (stored[length] > 0x7F) return; /* not ours; keep the defaults */
+        text[length] = (char)stored[length];
+    }
+    text[length] = 0;
+    if (length) gbi_parse(&g.keys, text); /* a bad value leaves the defaults */
+}
+
 void load_recents() {
     g.recents.clear();
     DWORD size = 0;
@@ -284,6 +389,10 @@ void pump_gb_audio() {
         gb_audio_clear(g.gb);
         return;
     }
+    if (g.ff_on) { /* four times faster is a squeal, not music: run silent and let the queue drain */
+        gb_audio_clear(g.gb);
+        return;
+    }
     float ratio = GB_SPEED_PERCENT[g.gb_speed] / 100.0f;
     SDL_SetAudioStreamFrequencyRatio(g.gb_stream, ratio);
     const int bytes_per_ms = (int)(GB_AUDIO_SAMPLE_RATE / 1000u) * 4;
@@ -314,8 +423,22 @@ void timer_tick(Chip8 *chip8, void *userdata) {
 void release_keys() {
     for (uint8_t key = 0; key < 16; key++) chip8_set_key(&g.machine, key, 0);
     for (int b = 0; b < GB_BUTTON_COUNT; b++) {
+        g.gb_kb[b] = false;
         g.gb_keys[b] = false;
         if (g.gb) gb_set_button(g.gb, (GbButton)b, 0);
+    }
+    g.ff_key = false;
+    g.pad_held = 0;
+}
+
+/* The console sees a button as held when the keyboard or a controller holds it. */
+void apply_buttons() {
+    for (int b = 0; b < GB_BUTTON_COUNT; b++) {
+        bool held = g.gb_kb[b] || (!paused() && (g.pad_held & PAD_BIT(b)) != 0);
+        if (held != g.gb_keys[b]) {
+            g.gb_keys[b] = held;
+            if (g.gb) gb_set_button(g.gb, (GbButton)b, held ? 1 : 0);
+        }
     }
 }
 
@@ -507,13 +630,20 @@ void render(Graphics &gfx, const RECT &clip) {
             {GB_BUTTON_UP, 1, 0, 1, L"↑", 15},    {GB_BUTTON_LEFT, 0, 1, 1, L"←", 15},
             {GB_BUTTON_RIGHT, 2, 1, 1, L"→", 15}, {GB_BUTTON_DOWN, 1, 2, 1, L"↓", 15},
             {GB_BUTTON_A, 3, 0, 1, L"A", 12},     {GB_BUTTON_B, 3, 1, 1, L"B", 12},
-            {GB_BUTTON_SELECT, 0, 3, 2, L"⌫ SELECT", 9}, {GB_BUTTON_START, 2, 3, 2, L"↵ START", 9},
+            {GB_BUTTON_SELECT, 0, 3, 2, L"SELECT", 9}, {GB_BUTTON_START, 2, 3, 2, L"START", 9},
         };
         for (const Cap &cap : caps)
             keycap(26.0f + cap.col * 44, 444.0f + cap.row * 39, cap.cols * 44 - 8, cap.label,
                    g.gb_keys[cap.button], cap.size);
-        draw_text(gfx, L"Arrows or WASD  ·  X/K is A  ·  Z/J is B", 26, 610, 190, 18, 10, UI, 0x7F847A);
-        draw_text(gfx, L"Space to pause  ·  M to mute", 26, 628, 190, 18, 10, UI, 0x7F847A);
+        draw_text(gfx, L"Rebind keys: Session ▸ Controls", 26, 610, 190, 18, 10, UI, 0x7F847A);
+        std::wstring fast = g.keys.key[GBI_FAST_FORWARD][0] < 0 && g.keys.key[GBI_FAST_FORWARD][1] < 0
+                                ? std::wstring(L"Fast-forward is unbound")
+                                : L"Hold " + action_key(GBI_FAST_FORWARD) + L" to fast-forward";
+        draw_text(gfx, fast.c_str(), 26, 628, 190, 18, 10, UI, 0x7F847A);
+        std::wstring states = L"Save " + action_key(GBI_SAVE_STATE) + L"  ·  Load " +
+                              action_key(GBI_LOAD_STATE) + L"  ·  Slot " + std::to_wstring(g.slot + 1);
+        draw_text(gfx, states.c_str(), 26, 646, 190, 18, 10, UI, 0x7F847A);
+        draw_text(gfx, L"Space to pause  ·  M to mute", 26, 664, 190, 18, 10, UI, 0x7F847A);
         draw_text(gfx, L"GAME BOY  /  160 × 144", 26, h - 36, 180, 18, 10, MONO, 0x878C80);
     } else {
         for (int i = 0; i < 16; i++) {
@@ -554,7 +684,13 @@ void render(Graphics &gfx, const RECT &clip) {
         nacre::fill_round(gfx, bx, by, 184, 30, 15, 0x35483C);
         draw_text(gfx, badge, bx, by + 6, 184, 20, 12, UI, 0xDCE8DA, StringAlignmentCenter);
     }
+    if (g.ff_on) {
+        float bx = well.x + well.w - 112.0f, by = well.y + 18.0f;
+        nacre::fill_round(gfx, bx, by, 94, 30, 15, 0x35483C);
+        draw_text(gfx, L"FAST  4×", bx, by + 6, 94, 20, 12, UI, 0xDCE8DA, StringAlignmentCenter);
+    }
     std::wstring note = !g.fault.empty()     ? widen(g.fault.c_str())
+                        : g.is_gb && !g.status.empty() ? g.status
                         : !g.audio_available || (g.is_gb && !g.gb_stream)
                             ? std::wstring(L"Audio unavailable")
                         : g.is_gb            ? g.save_note
@@ -855,13 +991,33 @@ bool read_file(const std::wstring &path, std::vector<uint8_t> &bytes, std::strin
 
 /* ---- Game Boy battery saves -------------------------------------------- */
 
-/* "Tetris.gb" saves to "Tetris.sav" in the same folder, as most emulators do. */
-std::wstring save_path_for(const std::wstring &rom_path) {
+/* "Tetris.gb" -> "Tetris", so saves and states sit beside the ROM, as most emulators do. */
+std::wstring path_stem(const std::wstring &rom_path) {
     size_t slash = rom_path.find_last_of(L"\\/");
     size_t dot = rom_path.find_last_of(L'.');
-    if (dot == std::wstring::npos || (slash != std::wstring::npos && dot < slash))
-        return rom_path + L".sav";
-    return rom_path.substr(0, dot) + L".sav";
+    if (dot == std::wstring::npos || (slash != std::wstring::npos && dot < slash)) return rom_path;
+    return rom_path.substr(0, dot);
+}
+
+std::wstring save_path_for(const std::wstring &rom_path) { return path_stem(rom_path) + L".sav"; }
+
+/* Writes to a temporary file first, then swaps it into place, so a crash mid-write
+ * never leaves a torn file. */
+bool write_atomic(const std::wstring &path, const uint8_t *data, size_t size) {
+    std::wstring temp = path + L".tmp";
+    HANDLE file = CreateFileW(temp.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL, NULL);
+    bool ok = file != INVALID_HANDLE_VALUE && size > 0;
+    if (file != INVALID_HANDLE_VALUE) {
+        DWORD written = 0;
+        ok = ok && WriteFile(file, data, (DWORD)size, &written, NULL) && written == size;
+        ok = FlushFileBuffers(file) && ok;
+        CloseHandle(file);
+    }
+    if (ok)
+        ok = MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+    if (!ok) DeleteFileW(temp.c_str());
+    return ok;
 }
 
 /* Writes the cartridge RAM when it has changed: to a temporary file first, then
@@ -872,27 +1028,96 @@ void write_save() {
     gb_set_wall_clock(g.gb, (int64_t)time(NULL));
     std::vector<uint8_t> data(gb_save_size(g.gb));
     size_t size = data.empty() ? 0 : gb_save_write(g.gb, data.data(), data.size());
-    std::wstring temp = g.save_path + L".tmp";
-    HANDLE file = CreateFileW(temp.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
-                              FILE_ATTRIBUTE_NORMAL, NULL);
-    bool ok = file != INVALID_HANDLE_VALUE && size > 0;
-    if (file != INVALID_HANDLE_VALUE) {
-        DWORD written = 0;
-        ok = ok && WriteFile(file, data.data(), (DWORD)size, &written, NULL) && written == size;
-        ok = FlushFileBuffers(file) && ok;
-        CloseHandle(file);
-    }
-    if (ok)
-        ok = MoveFileExW(temp.c_str(), g.save_path.c_str(),
-                         MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
-    if (ok) {
+    if (size > 0 && write_atomic(g.save_path, data.data(), size)) {
         gb_save_mark_clean(g.gb);
         g.save_note = L"Saved to " + file_name(g.save_path);
     } else {
-        DeleteFileW(temp.c_str());
         g.save_note = L"Couldn't write " + file_name(g.save_path);
     }
     invalidate_footer();
+}
+
+/* ---- Game Boy save states ---------------------------------------------- */
+
+/* A short message in the footer that clears itself after a few seconds. */
+void set_status(const std::wstring &text) {
+    g.status = text;
+    g.status_until = SDL_GetTicksNS() + 3000000000ull;
+    invalidate_footer();
+}
+
+/* "Tetris.gb" keeps its states in "Tetris.state1" .. "Tetris.state4". The built-in demo
+ * and anything opened without a path has nowhere to put them. */
+std::wstring state_path(int slot) {
+    if (g.rom_path.empty() || g.rom_bundled) return std::wstring();
+    return path_stem(g.rom_path) + L".state" + std::to_wstring(slot + 1);
+}
+
+/* "Slot 2  ·  2026-11-15 14:22", or "Slot 2  ·  empty", for the menu. */
+std::wstring slot_label(int slot) {
+    std::wstring text = L"Slot &" + std::to_wstring(slot + 1) + L"  \u00B7  ";
+    std::wstring path = state_path(slot);
+    WIN32_FILE_ATTRIBUTE_DATA info;
+    FILETIME local;
+    SYSTEMTIME when;
+    if (!path.empty() && GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &info) &&
+        FileTimeToLocalFileTime(&info.ftLastWriteTime, &local) && FileTimeToSystemTime(&local, &when)) {
+        wchar_t stamp[32];
+        swprintf(stamp, 32, L"%04d-%02d-%02d %02d:%02d", when.wYear, when.wMonth, when.wDay, when.wHour,
+                 when.wMinute);
+        return text + stamp;
+    }
+    return text + L"empty";
+}
+
+void save_state() {
+    if (!g.is_gb || !g.gb || g.rom.empty()) return;
+    std::wstring path = state_path(g.slot);
+    std::wstring slot = std::to_wstring(g.slot + 1);
+    if (path.empty()) {
+        set_status(L"Save states need a ROM opened from a file");
+        return;
+    }
+    std::vector<uint8_t> blob(gb_state_size(g.gb));
+    size_t size = blob.empty() ? 0 : gb_state_save(g.gb, blob.data(), blob.size());
+    if (size > 0 && write_atomic(path, blob.data(), size)) set_status(L"Saved state to slot " + slot);
+    else set_status(L"Couldn't save to slot " + slot);
+}
+
+void load_state() {
+    if (!g.is_gb || !g.gb || g.rom.empty()) return;
+    std::wstring path = state_path(g.slot);
+    std::wstring slot = std::to_wstring(g.slot + 1);
+    if (path.empty()) {
+        set_status(L"Save states need a ROM opened from a file");
+        return;
+    }
+    std::vector<uint8_t> blob;
+    DWORD code = read_bytes(path, 1u << 24, blob);
+    if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND) {
+        set_status(L"Slot " + slot + L" is empty");
+    } else if (code == 0 && gb_state_load(g.gb, blob.data(), blob.size())) {
+        /* The state remembers the buttons held when it was saved; what is held now wins. */
+        for (int b = 0; b < GB_BUTTON_COUNT; b++) gb_set_button(g.gb, (GbButton)b, g.gb_keys[b] ? 1 : 0);
+        gb_audio_clear(g.gb);
+        g.fault.clear();
+        g.previous = SDL_GetTicksNS();
+        g.gb_frame_seen = gb_frame_count(g.gb) - 1;
+        invalidate_well();
+        update_controls();
+        set_status(L"Loaded state from slot " + slot);
+    } else {
+        set_status(L"Slot " + slot + L" doesn't fit this game");
+    }
+}
+
+void set_slot(int slot) {
+    if (slot < 0 || slot >= GB_STATE_SLOTS) return;
+    g.slot = slot;
+    reg_set_dword(L"gbSlot", (DWORD)slot);
+    set_status(L"State slot " + std::to_wstring(slot + 1));
+    invalidate_keys();
+    invalidate_all();
 }
 
 void read_save() {
@@ -1136,6 +1361,185 @@ void choose_popup(HWND anchor, const wchar_t *const *names, int base, int select
     }
 }
 
+/* ---- Controls window: keyboard rebinding -------------------------------- */
+
+namespace controls {
+
+const int ID_SLOT_BASE = 7000; /* + action * 2 + slot */
+const int ID_RESET = 7100;
+const int ID_DONE = 7101;
+
+struct Dialog {
+    HWND window, hint, done;
+    HWND slot[GBI_COUNT][GBI_KEYS_PER_ACTION];
+    HFONT font;
+    int capture; /* action * 2 + slot being rebound, or -1 */
+    bool running;
+    std::wstring message;
+};
+Dialog dlg;
+
+void refresh() {
+    for (int a = 0; a < GBI_COUNT; a++) {
+        for (int k = 0; k < GBI_KEYS_PER_ACTION; k++) {
+            bool capturing = dlg.capture == a * GBI_KEYS_PER_ACTION + k;
+            std::wstring text = capturing ? std::wstring(L"Press a key…") : key_name(g.keys.key[a][k]);
+            SetWindowTextW(dlg.slot[a][k], text.c_str());
+        }
+    }
+    const wchar_t *hint = dlg.capture >= 0 ? L"Press the new key. Esc cancels, Del clears."
+                          : dlg.message.empty() ? L"Click a key to change it. Every action takes two keys."
+                                                : dlg.message.c_str();
+    SetWindowTextW(dlg.hint, hint);
+}
+
+void capture_key(LPARAM lparam) {
+    int code = key_code((UINT)((lparam >> 16) & 0xFF), (lparam & (1 << 24)) != 0);
+    int action = dlg.capture / GBI_KEYS_PER_ACTION, slot = dlg.capture % GBI_KEYS_PER_ACTION;
+    dlg.message.clear();
+    if (code == 0x01) {
+        dlg.capture = -1; /* Esc: leave it as it was */
+    } else if (code == 0x153) { /* Del */
+        gbi_assign(&g.keys, (GbInput)action, slot, GBI_UNBOUND);
+        save_bindings();
+        dlg.capture = -1;
+    } else if (key_reserved(code)) {
+        dlg.message = L"Nacre uses " + key_name(code) + L" itself. Pick another key.";
+        dlg.capture = -1;
+    } else {
+        int previous = gbi_assign(&g.keys, (GbInput)action, slot, code);
+        if (previous >= 0)
+            dlg.message = key_name(code) + L" moved here from " + widen(gbi_name((GbInput)previous)) + L".";
+        save_bindings();
+        dlg.capture = -1;
+    }
+    refresh();
+}
+
+LRESULT CALLBACK proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    switch (message) {
+    case WM_COMMAND: {
+        int id = (int)LOWORD(wparam);
+        if (HIWORD(wparam) != BN_CLICKED) break;
+        if (id >= ID_SLOT_BASE && id < ID_SLOT_BASE + GBI_COUNT * GBI_KEYS_PER_ACTION) {
+            dlg.capture = id - ID_SLOT_BASE;
+            dlg.message.clear();
+            refresh();
+        } else if (id == ID_RESET) {
+            gbi_set_defaults(&g.keys, DEFAULT_KEYS);
+            save_bindings();
+            dlg.capture = -1;
+            dlg.message = L"Keys restored to the defaults.";
+            refresh();
+        } else if (id == ID_DONE || id == IDCANCEL) {
+            dlg.running = false;
+        }
+        return 0;
+    }
+    case WM_CLOSE:
+        dlg.running = false;
+        return 0;
+    }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+void show() {
+    if (g.dialog_open) return;
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW cls = {sizeof(cls)};
+        cls.lpfnWndProc = proc;
+        cls.hInstance = g.instance;
+        cls.hCursor = LoadCursorW(NULL, IDC_ARROW);
+        cls.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        cls.hIcon = LoadIconW(g.instance, MAKEINTRESOURCEW(1));
+        cls.lpszClassName = L"NacreControls";
+        if (!RegisterClassExW(&cls)) return;
+        registered = true;
+    }
+    UINT dpi = GetDpiForWindow(g.hwnd);
+    auto S = [&](int v) { return MulDiv(v, (int)dpi, 96); };
+    const int CLIENT_CW = 430, CLIENT_CH = 524;
+    DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU, ex = WS_EX_DLGMODALFRAME;
+    RECT rc = {0, 0, S(CLIENT_CW), S(CLIENT_CH)};
+    AdjustWindowRectExForDpi(&rc, style, FALSE, ex, dpi);
+    RECT owner;
+    GetWindowRect(g.hwnd, &owner);
+    int w = rc.right - rc.left, h = rc.bottom - rc.top;
+    int x = owner.left + ((owner.right - owner.left) - w) / 2;
+    int y = owner.top + ((owner.bottom - owner.top) - h) / 2;
+    dlg = Dialog();
+    dlg.capture = -1;
+    dlg.window = CreateWindowExW(ex, L"NacreControls", L"Game Boy controls", style, x, y, w, h, g.hwnd, NULL,
+                                 g.instance, NULL);
+    if (!dlg.window) return;
+
+    NONCLIENTMETRICSW metrics = {sizeof(metrics)};
+    if (SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0, dpi))
+        dlg.font = CreateFontIndirectW(&metrics.lfMessageFont);
+    auto child = [&](const wchar_t *kind, const wchar_t *text, DWORD extra, int cx, int cy, int cw, int ch,
+                     int id) {
+        HWND control = CreateWindowExW(0, kind, text, WS_CHILD | WS_VISIBLE | extra, S(cx), S(cy), S(cw), S(ch),
+                                       dlg.window, (HMENU)(INT_PTR)id, g.instance, NULL);
+        if (dlg.font) SendMessageW(control, WM_SETFONT, (WPARAM)dlg.font, TRUE);
+        return control;
+    };
+    for (int a = 0; a < GBI_COUNT; a++) {
+        std::wstring name = widen(gbi_name((GbInput)a));
+        child(L"STATIC", name.c_str(), SS_LEFT, 20, 21 + a * 32, 110, 20, -1);
+        for (int k = 0; k < GBI_KEYS_PER_ACTION; k++)
+            dlg.slot[a][k] = child(L"BUTTON", L"", BS_PUSHBUTTON | WS_TABSTOP, 140 + k * 140, 16 + a * 32, 130, 28,
+                                   ID_SLOT_BASE + a * GBI_KEYS_PER_ACTION + k);
+    }
+    child(L"STATIC",
+          L"Controller: D-pad or left stick, face buttons, Start and Back work as on a Game Boy. "
+          L"The right shoulder or a trigger fast-forwards. Hold the left shoulder with Start, Back or Y "
+          L"to save, load or change slot.",
+          SS_LEFT, 20, 408, 390, 54, -1);
+    dlg.hint = child(L"STATIC", L"", SS_LEFT, 20, 468, 390, 20, -1);
+    child(L"BUTTON", L"Reset to defaults", BS_PUSHBUTTON | WS_TABSTOP, 20, 488, 140, 28, ID_RESET);
+    dlg.done = child(L"BUTTON", L"Done", BS_DEFPUSHBUTTON | WS_TABSTOP, 300, 488, 110, 28, ID_DONE);
+    refresh();
+
+    bool was_open = g.dialog_open;
+    g.dialog_open = true;
+    release_keys();
+    sync_audio();
+    EnableWindow(g.hwnd, FALSE);
+    ShowWindow(dlg.window, SW_SHOW);
+    SetFocus(dlg.done);
+    dlg.running = true;
+    MSG msg;
+    while (dlg.running) {
+        BOOL got = GetMessageW(&msg, NULL, 0, 0);
+        if (got <= 0) {
+            if (got == 0) PostQuitMessage((int)msg.wParam); /* the app is closing */
+            break;
+        }
+        if (dlg.capture >= 0 && (msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN) &&
+            (msg.hwnd == dlg.window || IsChild(dlg.window, msg.hwnd))) {
+            capture_key(msg.lParam);
+            continue;
+        }
+        if (IsDialogMessageW(dlg.window, &msg)) continue;
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    EnableWindow(g.hwnd, TRUE);
+    DestroyWindow(dlg.window);
+    if (dlg.font) DeleteObject(dlg.font);
+    dlg = Dialog();
+    g.dialog_open = was_open;
+    g.previous = SDL_GetTicksNS();
+    SetFocus(g.hwnd);
+    sync_audio();
+    update_controls();
+}
+
+} // namespace controls
+
+void show_controls() { controls::show(); }
+
 void on_command(int id) {
     switch (id) {
     case IDM_OPEN: open_rom(); break;
@@ -1146,6 +1550,9 @@ void on_command(int id) {
     case IDM_SOUND: toggle_sound(); break;
     case IDM_FULLSCREEN: toggle_fullscreen(); break;
     case IDM_ABOUT: show_about(); break;
+    case IDM_SAVE_STATE: save_state(); SetFocus(g.hwnd); break;
+    case IDM_LOAD_STATE: load_state(); SetFocus(g.hwnd); break;
+    case IDM_CONTROLS: show_controls(); break;
     case IDCANCEL:
         if (g.fullscreen) toggle_fullscreen();
         break;
@@ -1154,6 +1561,10 @@ void on_command(int id) {
     default:
         if (id >= IDM_SPEED_BASE && id < IDM_SPEED_BASE + 3) set_speed(id - IDM_SPEED_BASE);
         else if (id >= IDM_PALETTE_BASE && id < IDM_PALETTE_BASE + 3) set_palette(id - IDM_PALETTE_BASE);
+        else if (id >= IDM_SLOT_BASE && id < IDM_SLOT_BASE + GB_STATE_SLOTS) {
+            set_slot(id - IDM_SLOT_BASE);
+            SetFocus(g.hwnd);
+        }
         else if (id >= IDM_RECENT_BASE && id < IDM_RECENT_BASE + MAX_RECENT) {
             size_t index = (size_t)(id - IDM_RECENT_BASE);
             if (index < g.recents.size()) load_file(g.recents[index]);
@@ -1175,31 +1586,27 @@ int chip_key(UINT scan) {
     }
 }
 
-/* Game Boy buttons: arrows or WASD for the D-pad, X/K for A and Z/J for B, Enter
- * for Start, Backspace or right Shift for Select. */
-int gb_key(UINT scan, bool extended) {
-    if (extended) {
-        switch (scan) {
-        case 0x48: return GB_BUTTON_UP;    case 0x50: return GB_BUTTON_DOWN;
-        case 0x4B: return GB_BUTTON_LEFT;  case 0x4D: return GB_BUTTON_RIGHT;
-        case 0x1C: return GB_BUTTON_START; /* numeric keypad Enter */
-        default: return -1;
-        }
-    }
-    switch (scan) {
-    case 0x2D: case 0x25: return GB_BUTTON_A; /* X, K */
-    case 0x2C: case 0x24: return GB_BUTTON_B; /* Z, J */
-    case 0x11: return GB_BUTTON_UP;     case 0x1F: return GB_BUTTON_DOWN;   /* W, S */
-    case 0x1E: return GB_BUTTON_LEFT;   case 0x20: return GB_BUTTON_RIGHT;  /* A, D */
-    case 0x1C: return GB_BUTTON_START;
-    case 0x0E: case 0x36: return GB_BUTTON_SELECT;
-    default: return -1;
+void set_gb_key(int button, bool held) {
+    g.gb_kb[button] = held;
+    apply_buttons();
+}
+
+/* A bound Game Boy key was pressed or released. */
+void gb_action_press(int action, bool repeat) {
+    if (action < GBI_BUTTONS) {
+        if (!paused() && !repeat) set_gb_key(action, true);
+    } else if (action == GBI_FAST_FORWARD) {
+        g.ff_key = true;
+    } else if (!repeat) {
+        if (action == GBI_SAVE_STATE) save_state();
+        else if (action == GBI_LOAD_STATE) load_state();
+        else if (action == GBI_NEXT_SLOT) set_slot((g.slot + 1) % GB_STATE_SLOTS);
     }
 }
 
-void set_gb_key(int button, bool held) {
-    g.gb_keys[button] = held;
-    if (g.gb) gb_set_button(g.gb, (GbButton)button, held ? 1 : 0);
+void gb_action_release(int action) {
+    if (action < GBI_BUTTONS) set_gb_key(action, false);
+    else if (action == GBI_FAST_FORWARD) g.ff_key = false;
 }
 
 void sync_key_display() {
@@ -1220,15 +1627,15 @@ bool handle_key(UINT message, WPARAM wparam, LPARAM lparam, bool main_has_focus)
     UINT scan = (lparam >> 16) & 0xFF;
     bool extended = (lparam & (1 << 24)) != 0;
     if (g.is_gb) {
-        int button = gb_key(scan, extended);
+        int action = gbi_lookup(&g.keys, key_code(scan, extended));
         if (up) {
-            if (button < 0) return false;
-            set_gb_key(button, false);
+            if (action < 0) return false;
+            gb_action_release(action);
             sync_key_display();
             return true;
         }
-        if (button >= 0 && GetKeyState(VK_CONTROL) >= 0 && GetKeyState(VK_MENU) >= 0) {
-            if (!paused() && !(lparam & (1 << 30))) set_gb_key(button, true);
+        if (action >= 0 && GetKeyState(VK_CONTROL) >= 0 && GetKeyState(VK_MENU) >= 0) {
+            gb_action_press(action, (lparam & (1 << 30)) != 0);
             sync_key_display();
             return true;
         }
@@ -1324,6 +1731,23 @@ DropTarget drop_target;
 
 /* ---- Frame loop -------------------------------------------------------- */
 
+/* Reads the controllers: held buttons feed the console, and the state hotkeys fire once
+ * per press. Only the focused window listens, so a game in the background isn't played. */
+void poll_pad() {
+    unsigned held = pad_poll();
+    const char *note = pad_take_message();
+    if (note && g.is_gb) set_status(widen(note));
+    bool listening = g.is_gb && !g.dialog_open && GetForegroundWindow() == g.hwnd;
+    if (!listening) held = 0;
+    unsigned fresh = held & ~g.pad_seen;
+    g.pad_seen = held;
+    g.pad_held = held;
+    apply_buttons();
+    if (fresh & PAD_BIT(GBI_SAVE_STATE)) save_state();
+    if (fresh & PAD_BIT(GBI_LOAD_STATE)) load_state();
+    if (fresh & PAD_BIT(GBI_NEXT_SLOT)) set_slot((g.slot + 1) % GB_STATE_SLOTS);
+}
+
 void tick() {
     if (g.in_tick) return;
     g.in_tick = true;
@@ -1331,8 +1755,18 @@ void tick() {
     g.previous = now;
     char error[256];
     if (g.is_gb) {
-        if (!paused() &&
-            !gb_advance_ns(g.gb, elapsed, GB_SPEED_PERCENT[g.gb_speed], error, sizeof(error))) {
+        poll_pad();
+        bool fast = (g.ff_key || (g.pad_held & PAD_BIT(GBI_FAST_FORWARD)) != 0) && !paused();
+        if (fast != g.ff_on) {
+            g.ff_on = fast;
+            invalidate_well();
+        }
+        if (!g.status.empty() && now >= g.status_until) {
+            g.status.clear();
+            invalidate_footer();
+        }
+        unsigned percent = g.ff_on ? GB_FAST_PERCENT : GB_SPEED_PERCENT[g.gb_speed];
+        if (!paused() && !gb_advance_ns(g.gb, elapsed, percent, error, sizeof(error))) {
             g.fault = error;
             write_save();
             release_keys();
@@ -1350,6 +1784,10 @@ void tick() {
         }
         g.in_tick = false;
         return;
+    }
+    if (g.ff_on) {
+        g.ff_on = false;
+        invalidate_well();
     }
     if (!chip8_scheduler_advance(&g.machine, &g.scheduler, elapsed, paused(), timer_tick, NULL, error,
                                  sizeof(error))) {
@@ -1436,6 +1874,38 @@ int check_gb_keys(int base) {
     return 0;
 }
 
+/* Fast-forward as a held key, a save-state round trip on the running cartridge, and the
+ * rebinding table. Returns 0, or base..base+8 for the failing step. */
+int check_gb_features(int base) {
+    const LPARAM tab = (LPARAM)(1 | (0x0F << 16));
+    SendMessageW(g.hwnd, WM_KEYDOWN, VK_TAB, tab);
+    if (!g.ff_key) return base;
+    SendMessageW(g.hwnd, WM_KEYUP, VK_TAB, tab | (LPARAM)(3u << 30));
+    if (g.ff_key) return base + 1;
+
+    char error[256];
+    std::vector<uint8_t> blob(gb_state_size(g.gb));
+    if (blob.empty() || gb_state_save(g.gb, blob.data(), blob.size()) != blob.size()) return base + 2;
+    uint32_t saved = gb_frame_count(g.gb);
+    if (!gb_run_cycles(g.gb, GB_CLOCK_HZ / 10, error, sizeof(error)) || gb_frame_count(g.gb) == saved)
+        return base + 3;
+    if (!gb_state_load(g.gb, blob.data(), blob.size())) return base + 4;
+    if (gb_frame_count(g.gb) != saved) return base + 5;
+    blob[blob.size() / 2] ^= 0xFF;
+    blob[0] ^= 0xFF; /* a damaged header is refused */
+    if (gb_state_load(g.gb, blob.data(), blob.size())) return base + 6;
+
+    GbBindings original = g.keys;
+    if (gbi_assign(&g.keys, GBI_A, 0, 0x0F) != GBI_FAST_FORWARD || g.keys.key[GBI_FAST_FORWARD][0] != -1)
+        return base + 7;
+    char text[256];
+    GbBindings parsed;
+    bool round_trip = gbi_serialize(&g.keys, text, sizeof(text)) > 0 && gbi_parse(&parsed, text) &&
+                      memcmp(&parsed, &g.keys, sizeof(parsed)) == 0;
+    g.keys = original;
+    return round_trip ? 0 : base + 8;
+}
+
 /* Exercise native actions and the physical keypad path before rendering, like
  * the Mac snapshot. Returns 0 on success or a nonzero stage number. */
 int run_snapshot() {
@@ -1453,6 +1923,7 @@ int run_snapshot() {
     if (g.is_gb) {
         /* Launched with a cartridge: check its keys, run it a while, and capture it. */
         int stage = check_gb_keys(12);
+        if (!stage) stage = check_gb_features(16);
         if (stage) return stage;
         if (!gb_run_cycles(g.gb, (uint32_t)(GB_CLOCK_HZ * g.snapshot_seconds), error, sizeof(error)))
             return 15;
@@ -1472,6 +1943,7 @@ int run_snapshot() {
     load_candidate(snapshot_cartridge(), L"", false);
     if (!g.is_gb || !g.fault.empty()) return 7;
     int stage = check_gb_keys(8);
+    if (!stage) stage = check_gb_features(30);
     if (stage) return stage;
     load_candidate(rom, rom_path, bundled);
     if (g.is_gb) return 11;
@@ -1498,6 +1970,13 @@ void build_menus() {
     AppendMenuW(g.session_menu, MF_STRING, IDM_PAUSE, L"&Pause / Resume\tCtrl+P");
     AppendMenuW(g.session_menu, MF_STRING, IDM_RESTART, L"&Restart ROM\tCtrl+R");
     AppendMenuW(g.session_menu, MF_STRING, IDM_SOUND, L"Toggle &Sound\tM");
+    AppendMenuW(g.session_menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(g.session_menu, MF_STRING, IDM_SAVE_STATE, L"Sa&ve state");
+    AppendMenuW(g.session_menu, MF_STRING, IDM_LOAD_STATE, L"&Load state");
+    g.slot_menu = CreatePopupMenu();
+    for (int i = 0; i < GB_STATE_SLOTS; i++) AppendMenuW(g.slot_menu, MF_STRING, IDM_SLOT_BASE + i, L"Slot");
+    AppendMenuW(g.session_menu, MF_POPUP, (UINT_PTR)g.slot_menu, L"S&tate slot");
+    AppendMenuW(g.session_menu, MF_STRING, IDM_CONTROLS, L"&Controls…");
     AppendMenuW(g.session_menu, MF_SEPARATOR, 0, NULL);
     g.speed_menu = CreatePopupMenu();
     for (int i = 0; i < 3; i++) AppendMenuW(g.speed_menu, MF_STRING, IDM_SPEED_BASE + i, SPEED_NAME[i]);
@@ -1543,6 +2022,20 @@ void refresh_menu(HMENU menu) {
         ModifyMenuW(menu, IDM_PAUSE, MF_BYCOMMAND | MF_STRING, IDM_PAUSE,
                     g.user_paused ? L"&Resume\tCtrl+P" : L"&Pause\tCtrl+P");
         CheckMenuItem(menu, IDM_SOUND, MF_BYCOMMAND | (g.muted ? MF_UNCHECKED : MF_CHECKED));
+        bool states = g.is_gb && ready && !state_path(g.slot).empty();
+        UINT can = states ? MF_ENABLED : MF_GRAYED;
+        EnableMenuItem(menu, IDM_SAVE_STATE, MF_BYCOMMAND | can);
+        EnableMenuItem(menu, IDM_LOAD_STATE, MF_BYCOMMAND | can);
+        EnableMenuItem(menu, 6, MF_BYPOSITION | (g.is_gb && ready ? MF_ENABLED : MF_GRAYED));
+        ModifyMenuW(menu, IDM_SAVE_STATE, MF_BYCOMMAND | MF_STRING, IDM_SAVE_STATE,
+                    menu_label(L"Sa&ve state", GBI_SAVE_STATE).c_str());
+        ModifyMenuW(menu, IDM_LOAD_STATE, MF_BYCOMMAND | MF_STRING, IDM_LOAD_STATE,
+                    menu_label(L"&Load state", GBI_LOAD_STATE).c_str());
+    } else if (menu == g.slot_menu) {
+        for (int i = 0; i < GB_STATE_SLOTS; i++)
+            ModifyMenuW(menu, (UINT)i, MF_BYPOSITION | MF_STRING, (UINT_PTR)(IDM_SLOT_BASE + i),
+                        slot_label(i).c_str());
+        CheckMenuRadioItem(menu, 0, GB_STATE_SLOTS - 1, (UINT)g.slot, MF_BYPOSITION);
     } else if (menu == g.speed_menu) {
         for (int i = 0; i < 3; i++)
             ModifyMenuW(menu, (UINT)i, MF_BYPOSITION | MF_STRING, (UINT_PTR)(IDM_SPEED_BASE + i),
@@ -1731,6 +2224,8 @@ bool initialize(int show) {
     if (g.cpu_hz != 300 && g.cpu_hz != 600 && g.cpu_hz != 1000) g.cpu_hz = CHIP8_DEFAULT_CPU_HZ;
     g.gb_speed = (int)reg_dword(L"gbSpeed", 1);
     if (g.gb_speed < 0 || g.gb_speed > 2) g.gb_speed = 1;
+    load_bindings();
+    if (!g.ephemeral) g.slot = (int)std::min<DWORD>(reg_dword(L"gbSlot", 0), (DWORD)(GB_STATE_SLOTS - 1));
     g.gb = gb_create();
     if (!g.ephemeral) load_recents();
     chip8_init(&g.machine, 0x4E414352u);
@@ -1833,6 +2328,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     ULONG_PTR gdiplus_token = 0;
     if (GdiplusStartup(&gdiplus_token, &input, NULL) != Ok) return 1;
     SDL_Init(SDL_INIT_AUDIO);
+    pad_init();
     timeBeginPeriod(1);
 
     int status = 1;
@@ -1857,6 +2353,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         shutdown();
     }
     timeEndPeriod(1);
+    pad_shutdown();
     SDL_Quit();
     GdiplusShutdown(gdiplus_token);
     OleUninitialize();
