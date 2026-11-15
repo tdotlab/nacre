@@ -6,6 +6,10 @@ A compact CHIP-8 interpreter with native Mac and Windows apps, a portable SDL3 f
 
 *The actual AppKit interface, captured by the Mac CI runner.*
 
+![Nacre Windows interface](screenshots/nacre-windows.png)
+
+*The Windows interface, captured by the app's own `--snapshot` mode.*
+
 ## Build and play
 
 You need a C99 compiler, `make`, and SDL2 development files for live audio. `pkg-config` is used to find SDL2.
