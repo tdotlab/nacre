@@ -18,5 +18,10 @@
         <key>CFBundleTypeExtensions</key><array><string>ch8</string><string>rom</string></array>
         <key>CFBundleTypeRole</key><string>Viewer</string>
         <key>LSHandlerRank</key><string>Alternate</string>
+    </dict><dict>
+        <key>CFBundleTypeName</key><string>Game Boy ROM</string>
+        <key>CFBundleTypeExtensions</key><array><string>gb</string><string>gbc</string></array>
+        <key>CFBundleTypeRole</key><string>Viewer</string>
+        <key>LSHandlerRank</key><string>Alternate</string>
     </dict></array>
 </dict></plist>
