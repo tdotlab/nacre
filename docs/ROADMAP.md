@@ -42,10 +42,9 @@ Order of work:
 5. The app frontends.
 6. Accuracy follow-up.
 
-Steps 1–4 are done at the core level, and step 6 is done apart from one test.
-All 115 ROM checks pass:
+Steps 1–4 and 6 are done at the core level. All 116 ROM checks pass:
 
-- Blargg: `cpu_instrs`, `instr_timing`, `mem_timing` (both), `halt_bug`, `dmg_sound` 01–08, and `oam_bug` 1–6 and 8.
+- Blargg: `cpu_instrs`, `instr_timing`, `mem_timing` (both), `halt_bug`, `dmg_sound` 01–08, and all eight `oam_bug` tests.
 - `dmg-acid2`, pixel-exact.
 - Mooneye: the boot state (`boot_regs`, `boot_div`, `boot_hwio`, `boot_sclk_align`), the timer, instruction and interrupt timing, HALT/EI/DI, OAM DMA (including restart and sources), the PPU timing tests (`intr_*`, `lcdon_*`, `stat_*`, `hblank_ly_scx`, `vblank_stat_intr`), the bit and DAA tests, and the MBC1 (including the 8 Mb multicart), MBC2 and MBC5 tests.
 
@@ -83,11 +82,18 @@ remain: audio by ear, real key play, and a save surviving a relaunch, on each OS
 Step 6 covered the boot state, the serial clock, PPU access windows and STAT
 timing, mid-line register writes, the STAT-write and LY=153 quirks, OAM DMA
 details, the OAM corruption bug and MBC1 multicarts. Five commercial games still
-render through their title screens headlessly after these changes. What remains:
+render through their title screens headlessly after these changes.
 
-- `oam_bug/7-timing_effect` fails. It prints a large OAM diff per step, fills the
-  8 KiB cart RAM log before it reports, and its include file is missing from the
-  public package, so the cause is not isolated.
+`oam_bug/7-timing_effect` is checked through the combined `oam_bug.gb`, not its
+single. The single sweeps `inc de` across one scanline a cycle at a time and
+prints a 525-byte OAM dump for each of the ~19 corrupting steps. That is about
+10 KiB, and the shell's unbounded text log runs from $A004 past $BFFF into the
+test's own code at $C000, so it restarts forever. The combined ROM checks the
+same CRC without that log and passes, so our timing and patterns match the
+recorded hardware result.
+
+What remains:
+
 - A real pixel FIFO. Spans put mid-line writes at about the right pixel, but
   effects that depend on exact fetcher timing are approximate.
 - Externally clocked serial and the link cable: there is no second machine.

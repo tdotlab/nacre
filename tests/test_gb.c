@@ -111,7 +111,10 @@ static const RomCheck checks[] = {
     {"mooneye/acceptance/ppu/stat_irq_blocking.gb", CHECK_FIBONACCI, 10, NULL},
     {"mooneye/acceptance/ppu/stat_lyc_onoff.gb", CHECK_FIBONACCI, 10, NULL},
     {"mooneye/acceptance/ppu/vblank_stat_intr-GS.gb", CHECK_FIBONACCI, 10, NULL},
-    /* OAM corruption bug (7-timing_effect still fails; see docs/ROADMAP.md) */
+    /* OAM corruption bug. The 7-timing_effect single cannot pass: its correct
+     * output (about 19 OAM dumps) overruns the 8 KiB cart-RAM log into the
+     * test's own code in WRAM. The combined ROM runs it without that log and
+     * checks the same CRC, so it stands in for test 7. */
     {"gb-test-roms/oam_bug/rom_singles/1-lcd_sync.gb", CHECK_MEMORY, 20, NULL},
     {"gb-test-roms/oam_bug/rom_singles/2-causes.gb", CHECK_MEMORY, 20, NULL},
     {"gb-test-roms/oam_bug/rom_singles/3-non_causes.gb", CHECK_MEMORY, 20, NULL},
@@ -119,6 +122,7 @@ static const RomCheck checks[] = {
     {"gb-test-roms/oam_bug/rom_singles/5-timing_bug.gb", CHECK_MEMORY, 20, NULL},
     {"gb-test-roms/oam_bug/rom_singles/6-timing_no_bug.gb", CHECK_MEMORY, 20, NULL},
     {"gb-test-roms/oam_bug/rom_singles/8-instr_effect.gb", CHECK_MEMORY, 20, NULL},
+    {"gb-test-roms/oam_bug/oam_bug.gb", CHECK_MEMORY, 30, NULL},
     {"mooneye/emulator-only/mbc1/bits_bank1.gb", CHECK_FIBONACCI, 10, NULL},
     {"mooneye/emulator-only/mbc1/bits_bank2.gb", CHECK_FIBONACCI, 10, NULL},
     {"mooneye/emulator-only/mbc1/bits_mode.gb", CHECK_FIBONACCI, 10, NULL},
