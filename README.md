@@ -146,6 +146,13 @@ second. The default output path is `nacre.wav`.
 
 `make clean` removes the compiled executable. The ROMs and generated WAV files are not tracked by Git.
 
+## License
+
+Nacre's source is released under the [MIT License](LICENSE). The apps statically
+link SDL3 (zlib license), whose notice ships beside them as
+`THIRD_PARTY_NOTICES.txt`. Downloaded game ROMs in `.roms-cache/` belong to their
+own authors and are not covered by this license.
+
 ## Development
 
 Run `make test` for the SDL-free scheduler and key-wait checks. The desktop source,

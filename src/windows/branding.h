@@ -48,11 +48,18 @@ inline void fill_round(Gdiplus::Graphics &g, float x, float y, float w, float h,
     g.FillPath(&brush, &path);
 }
 
-/* The app icon on a 512-unit canvas, scaled to `size` device pixels. */
+/* The app icon on a 512-unit canvas, scaled to `size` device pixels. The Mac artwork
+ * leaves a 28-unit margin for its Dock conventions; Windows taskbar and Explorer
+ * icons run nearly edge to edge, so the same art is enlarged about its center to
+ * span 8..504 and look as big as its neighbors. */
 inline void draw_icon(Gdiplus::Graphics &g, float size) {
     Gdiplus::GraphicsState state = g.Save();
     g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
     g.ScaleTransform(size / 512.0f, size / 512.0f);
+    const float fill = 496.0f / 456.0f;
+    g.TranslateTransform(256.0f, 256.0f);
+    g.ScaleTransform(fill, fill);
+    g.TranslateTransform(-256.0f, -256.0f);
     fill_round(g, 28, 28, 456, 456, 100, 0xE8E7DA);
     fill_round(g, 52, 52, 408, 408, 82, 0x243E32);
     Gdiplus::Pen pen(color(0xCDDDC7), 10.0f);
