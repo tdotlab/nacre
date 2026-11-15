@@ -158,8 +158,9 @@ second. The default output path is `nacre.wav`.
 
 - An SM83 CPU stepped per memory cycle, with timers and interrupts.
 - A per-dot PPU covering background, window and sprites.
-- OAM DMA, serial and the joypad.
-- MBC1, MBC2, MBC3 (with the real-time clock) and MBC5 cartridges.
+- OAM DMA, the serial port clocked from the DIV divider, the joypad, and the OAM corruption bug.
+- The post-boot register, DIV and I/O state of a DMG.
+- MBC1 (including multicarts), MBC2, MBC3 (with the real-time clock) and MBC5 cartridges.
 - Battery saves as standard `.sav` files: cart RAM, plus the common 48-byte RTC trailer for MBC3.
 - The four-channel APU, mixed down to 48 kHz stereo.
 
@@ -191,7 +192,7 @@ The core is checked against public test ROMs, which are fetched into the ignored
 
 ```sh
 python3 tools/get-gb-test-roms.py   # Blargg, dmg-acid2, Mooneye Test Suite
-make test                           # includes tests/test_gb (68 ROM checks + built-ins)
+make test                           # includes tests/test_gb (115 ROM checks + built-ins)
 ```
 
 `tests/test_gb --run ROM --seconds N --dump out.pgm --press start:9` runs one ROM headlessly. It holds a button at a given time and writes the final frame, which is how real games are smoke-tested.

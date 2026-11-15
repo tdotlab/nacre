@@ -9,11 +9,11 @@ audio devices.
 | `src/chip8.c`, `include/chip8.h` | Machine state, instructions, ROM bytes, key edges |
 | `src/scheduler.c` | Independent CPU / 60 Hz timer clocks, bounded catch-up, pause |
 | `src/audio.c` | Shared tone generator, CLI WAV and optional SDL2 live sink |
-| `include/gb.h`, `src/gb/gb.c` | Game Boy API, bus/memory map, timer, serial, OAM DMA, joypad, audio ring |
-| `src/gb/gb_cpu.c` | SM83 CPU, interrupts, HALT/EI/DI timing |
-| `src/gb/gb_ppu.c` | Per-dot PPU: modes, STAT, line render (BG, window, sprites) |
+| `include/gb.h`, `src/gb/gb.c` | Game Boy API, bus/memory map, post-boot state, timer, DIV-clocked serial, OAM DMA, joypad, audio ring |
+| `src/gb/gb_cpu.c` | SM83 CPU, interrupts, HALT/EI/DI timing, OAM-bug triggers on bus and IDU cycles |
+| `src/gb/gb_ppu.c` | Per-dot PPU: modes, STAT/LYC edges, VRAM/OAM access windows, span render (BG, window, sprites), OAM corruption |
 | `src/gb/gb_apu.c` | Four channels, frame sequencer, 48 kHz stereo mix |
-| `src/gb/gb_cart.c` | Header checks, MBC1/2/3/5, RTC, `.sav` format |
+| `src/gb/gb_cart.c` | Header checks, MBC1 (and multicart)/2/3/5, RTC, `.sav` format |
 | `tests/test_gb.c`, `tools/get-gb-test-roms.py` | ROM-driven core checks; headless run/dump/press tool |
 | `src/macos/main.m` | ARC-managed AppKit app, native menus/panels, display, controls, SDL3 audio, Game Boy display/keys/`.sav` |
 | `src/macos/Info.plist.in` | Mac identity, version, document associations, OS requirement |
@@ -53,9 +53,30 @@ Interrupts are sampled after the opcode-fetch cycle. When the CPU wakes from HAL
 the halted cycle stands in for that fetch. These two rules are what the Mooneye
 timing tests pin down.
 
-The PPU renders a whole line when mode 3 starts, so mid-line register tricks are
-not modelled. Mode 3 length still follows SCX and the sprite count. The
-framebuffer holds shade indices 0–3, and the frontends choose the colors.
+Reset leaves the machine where the DMG boot ROM hands off: registers, I/O
+values, and a DIV phase taken from Mooneye's `boot_*` tests. The serial port
+shifts on falling edges of bit 8 of the DIV counter, as the hardware does, so an
+internally clocked transfer takes 4096 T-cycles and lines up with DIV. The
+capture log records the byte the CPU last wrote to SB, because test ROMs often
+overwrite SB before a slow transfer finishes.
+
+The PPU keeps the dot timings the Mooneye PPU tests measure. They are listed at
+the top of `gb_ppu.c`: when VRAM and OAM lock and open for the CPU, when STAT
+modes change, and when LY=LYC is compared and dropped. STAT is an edge-triggered
+OR of its sources, and a DMG STAT write raises the spurious interrupt. Pixels are
+drawn in spans. A write to a PPU register during mode 3 first draws the line up
+to the current pixel, so mid-line palette, scroll and LCDC changes land at about
+the right place. A full pixel FIFO is not modelled, so effects that depend on
+exact fetcher timing are approximate. Mode 3 length follows SCX, sprites and the
+window. The framebuffer holds shade indices 0–3, and the frontends choose the
+colors.
+
+The OAM corruption bug follows Pan Docs. During the OAM scan the PPU reads one
+8-byte row per M-cycle, and a CPU access at dot 4k lands on row k+1. The CPU
+reports a read, a write, or a read in the same cycle as a 16-bit
+increment/decrement whenever the address or register value is in $FE00–$FEFF.
+That covers `inc/dec rr`, `ld a,(hl±)`, push, pop, call, rst, interrupt dispatch
+and fetches from OAM. `gb_oam_bug` then garbles that row from the row before it.
 
 Audio goes into a ring buffer of 48 kHz stereo `int16`. If nobody drains it, the
 oldest samples are dropped. Saves are byte buffers: `gb_save_write`/`gb_save_load`

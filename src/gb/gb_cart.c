@@ -16,6 +16,18 @@ int gb_rom_looks_valid(const uint8_t *rom, size_t length) {
     return rom && length >= 0x150 && memcmp(rom + 0x104, nintendo_logo, sizeof nintendo_logo) == 0;
 }
 
+/* MBC1M collections are 1 MiB with a full header (and logo) at the start of each
+ * 256 KiB game; ordinary 1 MiB MBC1 games have only the first. */
+static int is_mbc1_multicart(const uint8_t *rom, size_t size) {
+    int logos = 0;
+    size_t game;
+    if (size != 0x100000) return 0;
+    for (game = 1; game < 4; game++) {
+        if (memcmp(rom + game * 0x40000 + 0x104, nintendo_logo, sizeof nintendo_logo) == 0) logos++;
+    }
+    return logos >= 2;
+}
+
 static void fail(char *error, size_t capacity, const char *message) {
     if (error && capacity) snprintf(error, capacity, "%s", message);
 }
@@ -95,6 +107,7 @@ int gb_cart_load(GbCart *cart, const uint8_t *rom, size_t length, char *error, s
     if (ram_size) memset(cart->ram, 0xFF, ram_size);
     cart->rom_size = rom_size;
     cart->ram_size = ram_size;
+    cart->multicart = cart->mbc == GB_MBC1 && is_mbc1_multicart(cart->rom, rom_size);
 
     for (i = 0; i < 16; i++) {
         uint8_t ch = rom[0x134 + i];
@@ -152,12 +165,15 @@ uint8_t gb_cart_read(GbCart *cart, uint16_t a) {
     if (!cart->rom) return 0xFF;
     if (a < 0x4000) {
         size_t bank = 0;
-        if (cart->mbc == GB_MBC1 && cart->mode) bank = (size_t)(cart->ram_bank & 3) << 5;
+        if (cart->mbc == GB_MBC1 && cart->mode) bank = (size_t)(cart->ram_bank & 3) << (cart->multicart ? 4 : 5);
         return rom_at(cart, bank, a);
     }
     if (a < 0x8000) {
         size_t bank = cart->rom_bank;
-        if (cart->mbc == GB_MBC1) bank = (size_t)((cart->ram_bank & 3) << 5) | (cart->rom_bank & 0x1F);
+        if (cart->mbc == GB_MBC1) {
+            bank = cart->multicart ? (size_t)((cart->ram_bank & 3) << 4) | (cart->rom_bank & 0x0F)
+                                   : (size_t)((cart->ram_bank & 3) << 5) | (cart->rom_bank & 0x1F);
+        }
         return rom_at(cart, bank, (uint16_t)(a - 0x4000));
     }
     /* A000-BFFF */

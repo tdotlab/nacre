@@ -68,6 +68,57 @@ static const RomCheck checks[] = {
     {"mooneye/acceptance/bits/reg_f.gb", CHECK_FIBONACCI, 10, NULL},
     {"mooneye/acceptance/bits/unused_hwio-GS.gb", CHECK_FIBONACCI, 10, NULL},
     {"mooneye/acceptance/instr/daa.gb", CHECK_FIBONACCI, 10, NULL},
+    /* Boot state */
+    {"mooneye/acceptance/boot_regs-dmgABC.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/boot_div-dmgABCmgb.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/boot_hwio-dmgABCmgb.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/serial/boot_sclk_align-dmgABCmgb.gb", CHECK_FIBONACCI, 10, NULL},
+    /* Instruction and interrupt timing */
+    {"mooneye/acceptance/add_sp_e_timing.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/call_cc_timing.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/call_cc_timing2.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/call_timing.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/call_timing2.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/div_timing.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/halt_ime1_timing2-GS.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/interrupts/ie_push.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/jp_cc_timing.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/jp_timing.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/ld_hl_sp_e_timing.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/pop_timing.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/push_timing.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/ret_cc_timing.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/ret_timing.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/reti_timing.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/rst_timing.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/timer/tima_write_reloading.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/timer/tma_write_reloading.gb", CHECK_FIBONACCI, 10, NULL},
+    /* OAM DMA */
+    {"mooneye/acceptance/oam_dma_restart.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/oam_dma_start.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/oam_dma_timing.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/oam_dma/sources-GS.gb", CHECK_FIBONACCI, 10, NULL},
+    /* PPU timing */
+    {"mooneye/acceptance/ppu/hblank_ly_scx_timing-GS.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/ppu/intr_1_2_timing-GS.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/ppu/intr_2_0_timing.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/ppu/intr_2_mode0_timing.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/ppu/intr_2_mode0_timing_sprites.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/ppu/intr_2_mode3_timing.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/ppu/intr_2_oam_ok_timing.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/ppu/lcdon_timing-GS.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/ppu/lcdon_write_timing-GS.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/ppu/stat_irq_blocking.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/ppu/stat_lyc_onoff.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/acceptance/ppu/vblank_stat_intr-GS.gb", CHECK_FIBONACCI, 10, NULL},
+    /* OAM corruption bug (7-timing_effect still fails; see docs/ROADMAP.md) */
+    {"gb-test-roms/oam_bug/rom_singles/1-lcd_sync.gb", CHECK_MEMORY, 20, NULL},
+    {"gb-test-roms/oam_bug/rom_singles/2-causes.gb", CHECK_MEMORY, 20, NULL},
+    {"gb-test-roms/oam_bug/rom_singles/3-non_causes.gb", CHECK_MEMORY, 20, NULL},
+    {"gb-test-roms/oam_bug/rom_singles/4-scanline_timing.gb", CHECK_MEMORY, 20, NULL},
+    {"gb-test-roms/oam_bug/rom_singles/5-timing_bug.gb", CHECK_MEMORY, 20, NULL},
+    {"gb-test-roms/oam_bug/rom_singles/6-timing_no_bug.gb", CHECK_MEMORY, 20, NULL},
+    {"gb-test-roms/oam_bug/rom_singles/8-instr_effect.gb", CHECK_MEMORY, 20, NULL},
     {"mooneye/emulator-only/mbc1/bits_bank1.gb", CHECK_FIBONACCI, 10, NULL},
     {"mooneye/emulator-only/mbc1/bits_bank2.gb", CHECK_FIBONACCI, 10, NULL},
     {"mooneye/emulator-only/mbc1/bits_mode.gb", CHECK_FIBONACCI, 10, NULL},
@@ -80,6 +131,7 @@ static const RomCheck checks[] = {
     {"mooneye/emulator-only/mbc1/rom_4Mb.gb", CHECK_FIBONACCI, 10, NULL},
     {"mooneye/emulator-only/mbc1/rom_8Mb.gb", CHECK_FIBONACCI, 10, NULL},
     {"mooneye/emulator-only/mbc1/rom_16Mb.gb", CHECK_FIBONACCI, 10, NULL},
+    {"mooneye/emulator-only/mbc1/multicart_rom_8Mb.gb", CHECK_FIBONACCI, 10, NULL},
     {"mooneye/emulator-only/mbc2/bits_ramg.gb", CHECK_FIBONACCI, 10, NULL},
     {"mooneye/emulator-only/mbc2/bits_romb.gb", CHECK_FIBONACCI, 10, NULL},
     {"mooneye/emulator-only/mbc2/bits_unused.gb", CHECK_FIBONACCI, 10, NULL},
@@ -147,11 +199,16 @@ static int run_check(Gb *gb, const RomCheck *check, const char *dir, char *detai
                 return 0;
             }
         } else if (check->kind == CHECK_FIBONACCI) {
+            /* Search the whole log: a ROM may run its own transfers before the result. */
             static const char pass[6] = {3, 5, 8, 13, 21, 34};
-            if (length >= 6) {
-                if (memcmp(serial, pass, 6) == 0) return 1;
-                snprintf(detail, cap, "failure signature from the ROM");
-                return 0;
+            static const char fail[6] = {0x42, 0x42, 0x42, 0x42, 0x42, 0x42};
+            size_t i;
+            for (i = 0; i + 6 <= length; i++) {
+                if (memcmp(serial + i, pass, 6) == 0) return 1;
+                if (memcmp(serial + i, fail, 6) == 0) {
+                    snprintf(detail, cap, "failure signature from the ROM");
+                    return 0;
+                }
             }
         } else if (check->kind == CHECK_TILEMAP) {
             char text[32 * 32 + 1];

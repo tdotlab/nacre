@@ -26,6 +26,7 @@ typedef struct {
     GbMbcKind mbc;
     int has_battery;
     int has_rtc;
+    int multicart;        /* MBC1M: bank bit 4 unwired, upper bits shift by 4 */
     int ram_enabled;
     uint16_t rom_bank;    /* switchable bank register (meaning depends on MBC) */
     uint8_t ram_bank;     /* RAM bank or MBC1 upper bits or MBC3 RTC select */
@@ -41,12 +42,20 @@ typedef struct {
 
 typedef struct {
     uint8_t lcdc, stat, scy, scx, ly, lyc, bgp, obp0, obp1, wy, wx, dma;
+    int line;             /* the line being drawn; LY runs ahead of it near the line's end */
     int dot;              /* 0..455 within the line */
-    int mode;
+    int mode;             /* mode as seen by the STAT interrupt logic */
     int mode3_end;
+    int first_line;       /* line 0 right after the LCD is enabled: no OAM scan */
+    int lyc_flag;         /* latched LY=LYC comparison; frozen while the LCD is off */
     int window_line;
     int window_triggered;
+    int window_drawn;     /* the window covered at least one pixel of this line */
     int stat_line;
+    int render_x;         /* pixels of the current line already drawn */
+    int sprite_count;
+    uint8_t sprites[10];  /* OAM indices of this line's sprites, in drawing priority order */
+    uint8_t bg_index[GB_SCREEN_WIDTH]; /* background color numbers, for sprite priority */
     uint32_t off_cycles;
     uint32_t frame_count;
     uint8_t back[GB_SCREEN_WIDTH * GB_SCREEN_HEIGHT];
@@ -102,17 +111,22 @@ struct Gb {
     uint16_t div_counter;
     uint8_t tima, tma, tac;
     int tima_reload;      /* T-cycles until TIMA reloads from TMA after overflow */
+    int tima_reloaded;    /* the reload happened in the current M-cycle */
 
     /* Serial */
     uint8_t sb, sc;
-    int serial_timer;
+    uint8_t sb_written;   /* last byte the CPU wrote to SB: what a transfer logs */
+    int serial_timer;     /* bits left in an internally clocked transfer */
     char serial_out[GB_SERIAL_CAPACITY + 1];
     size_t serial_length;
 
-    /* OAM DMA */
-    int dma_active;
-    int dma_delay;
+    /* OAM DMA: a write to FF46 starts a transfer two M-cycles later; an earlier
+     * transfer keeps running (and blocking OAM) until then. */
+    int dma_active;       /* a transfer is moving bytes */
+    int dma_blocking;     /* OAM reads $FF and ignores writes */
+    int dma_pending;      /* M-cycles until a requested transfer begins, 0 = none */
     uint16_t dma_source;
+    uint16_t dma_pending_source;
     int dma_index;
 
     /* Joypad */
@@ -140,6 +154,12 @@ void gb_ppu_reset(Gb *gb);
 void gb_ppu_step(Gb *gb, int dots);
 uint8_t gb_ppu_read(Gb *gb, uint16_t address);
 void gb_ppu_write(Gb *gb, uint16_t address, uint8_t value);
+int gb_ppu_vram_open(const Gb *gb, int write); /* CPU may touch VRAM now */
+int gb_ppu_oam_open(const Gb *gb, int write);  /* CPU may touch OAM now (ignoring DMA) */
+/* What the CPU did on the OAM range this M-cycle: a write and/or a 16-bit
+ * increment/decrement, a read, or a read with an increment/decrement. */
+typedef enum { GB_OAM_BUG_WRITE, GB_OAM_BUG_READ, GB_OAM_BUG_READ_IDU } GbOamBug;
+void gb_oam_bug(Gb *gb, GbOamBug kind); /* garble OAM if the PPU is scanning it */
 
 void gb_apu_reset(Gb *gb);
 void gb_apu_step(Gb *gb, int cycles);

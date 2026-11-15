@@ -35,21 +35,25 @@ void gb_reset(Gb *gb) {
     memset(gb->hram, 0, sizeof gb->hram);
     gb->ie = 0;
     gb->if_reg = 0x01; /* the boot ROM leaves VBlank requested */
-    gb->div_counter = 0xABCC; /* DIV reads $AB after the DMG boot ROM */
+    gb->div_counter = 0xABC8; /* DMG boot ROM hand-off phase, from mooneye boot_div */
     gb->tima = 0;
     gb->tma = 0;
     gb->tac = 0;
     gb->tima_reload = 0;
+    gb->tima_reloaded = 0;
     gb->sb = 0;
+    gb->sb_written = 0;
     gb->sc = 0;
     gb->serial_timer = 0;
     gb->serial_length = 0;
     gb->serial_out[0] = '\0';
     gb->dma_active = 0;
-    gb->dma_delay = 0;
+    gb->dma_blocking = 0;
+    gb->dma_pending = 0;
     gb->dma_index = 0;
     gb->dma_source = 0;
-    gb->joyp_select = 0x30;
+    gb->dma_pending_source = 0;
+    gb->joyp_select = 0x00; /* JOYP reads $CF after boot */
     gb->buttons = 0;
     gb->cycles = 0;
     gb->pace_target = 0;
@@ -87,10 +91,22 @@ static void timer_increment(Gb *gb) {
     }
 }
 
+/* The internal serial clock (8192 Hz) is a tap on the same divider as DIV, so
+ * bits shift on its edges, not a fixed time after the SC write. */
+static void serial_clock(Gb *gb) {
+    if (gb->serial_timer <= 0) return;
+    gb->sb = (uint8_t)((gb->sb << 1) | 1); /* nothing is connected, so the line reads high */
+    if (--gb->serial_timer == 0) {
+        gb->sc &= 0x7F;
+        gb->if_reg |= GB_IRQ_SERIAL;
+    }
+}
+
 static void set_div_counter(Gb *gb, uint16_t value) {
     uint16_t old = gb->div_counter;
     gb->div_counter = value;
     if (timer_signal(gb, old) && !timer_signal(gb, value)) timer_increment(gb);
+    if ((old & 0x0100) && !(value & 0x0100)) serial_clock(gb);
     if ((old & 0x1000) && !(value & 0x1000)) gb_apu_frame_sequencer(gb);
 }
 
@@ -99,6 +115,7 @@ static void timer_step(Gb *gb) {
         gb->tima_reload--;
         if (gb->tima_reload == 0) {
             gb->tima = gb->tma;
+            gb->tima_reloaded = 1;
             gb->if_reg |= GB_IRQ_TIMER;
         }
     }
@@ -109,31 +126,32 @@ static void timer_step(Gb *gb) {
 
 void gb_tick(Gb *gb) {
     int i;
+    gb->tima_reloaded = 0;
     for (i = 0; i < 4; i++) timer_step(gb);
 
-    if (gb->serial_timer > 0) {
-        gb->serial_timer -= 4;
-        if (gb->serial_timer <= 0) {
-            gb->serial_timer = 0;
-            gb->sb = 0xFF; /* nothing is connected, so the line reads high */
-            gb->sc &= 0x7F;
-            gb->if_reg |= GB_IRQ_SERIAL;
-        }
+    if (gb->dma_pending && --gb->dma_pending == 0) {
+        gb->dma_active = 1;
+        gb->dma_index = 0;
+        gb->dma_source = gb->dma_pending_source;
     }
-
     if (gb->dma_active) {
-        if (gb->dma_delay > 0) {
-            gb->dma_delay--;
+        if (gb->dma_index >= 0xA0) {
+            /* OAM opens again one M-cycle after the last byte. */
+            gb->dma_active = 0;
+            gb->dma_blocking = 0;
         } else {
             uint16_t src = (uint16_t)(gb->dma_source + gb->dma_index);
             uint8_t value;
             if (src >= 0xE000) src = (uint16_t)(src - 0x2000);
-            gb->dma_active = 0; /* let the read see memory normally */
-            value = gb_bus_read(gb, src);
-            gb->dma_active = 1;
+            if (src >= 0x8000 && src < 0xA000) {
+                value = gb->vram[src - 0x8000]; /* the PPU's locks are for the CPU */
+            } else {
+                gb->dma_blocking = 0; /* let the read see memory normally */
+                value = gb_bus_read(gb, src);
+            }
+            gb->dma_blocking = 1;
             gb->oam[gb->dma_index] = value;
             gb->dma_index++;
-            if (gb->dma_index >= 0xA0) gb->dma_active = 0;
         }
     }
 
@@ -168,11 +186,11 @@ void gb_set_button(Gb *gb, GbButton button, int pressed) {
 
 uint8_t gb_bus_read(Gb *gb, uint16_t a) {
     if (a < 0x8000) return gb_cart_read(&gb->cart, a);
-    if (a < 0xA000) return gb->vram[a - 0x8000];
+    if (a < 0xA000) return gb_ppu_vram_open(gb, 0) ? gb->vram[a - 0x8000] : 0xFF;
     if (a < 0xC000) return gb_cart_read(&gb->cart, a);
     if (a < 0xE000) return gb->wram[a - 0xC000];
     if (a < 0xFE00) return gb->wram[a - 0xE000];
-    if (a < 0xFEA0) return gb->dma_active ? 0xFF : gb->oam[a - 0xFE00];
+    if (a < 0xFEA0) return (gb->dma_blocking || !gb_ppu_oam_open(gb, 0)) ? 0xFF : gb->oam[a - 0xFE00];
     if (a < 0xFF00) return 0x00;
     if (a >= 0xFF80 && a < 0xFFFF) return gb->hram[a - 0xFF80];
     if (a == 0xFFFF) return gb->ie;
@@ -195,34 +213,38 @@ uint8_t gb_bus_read(Gb *gb, uint16_t a) {
 
 void gb_bus_write(Gb *gb, uint16_t a, uint8_t v) {
     if (a < 0x8000) { gb_cart_write(&gb->cart, a, v); return; }
-    if (a < 0xA000) { gb->vram[a - 0x8000] = v; return; }
+    if (a < 0xA000) { if (gb_ppu_vram_open(gb, 1)) gb->vram[a - 0x8000] = v; return; }
     if (a < 0xC000) { gb_cart_write(&gb->cart, a, v); return; }
     if (a < 0xE000) { gb->wram[a - 0xC000] = v; return; }
     if (a < 0xFE00) { gb->wram[a - 0xE000] = v; return; }
-    if (a < 0xFEA0) { if (!gb->dma_active) gb->oam[a - 0xFE00] = v; return; }
+    if (a < 0xFEA0) { if (!gb->dma_blocking && gb_ppu_oam_open(gb, 1)) gb->oam[a - 0xFE00] = v; return; }
     if (a < 0xFF00) return;
     if (a >= 0xFF80 && a < 0xFFFF) { gb->hram[a - 0xFF80] = v; return; }
     if (a == 0xFFFF) { gb->ie = v; return; }
 
     switch (a) {
     case 0xFF00: gb->joyp_select = (uint8_t)(v & 0x30); return;
-    case 0xFF01: gb->sb = v; return;
+    case 0xFF01: gb->sb = v; gb->sb_written = v; return;
     case 0xFF02:
         gb->sc = (uint8_t)(v & 0x81);
         if ((v & 0x81) == 0x81) {
             if (gb->serial_length < GB_SERIAL_CAPACITY) {
-                gb->serial_out[gb->serial_length++] = (char)gb->sb;
+                gb->serial_out[gb->serial_length++] = (char)gb->sb_written;
                 gb->serial_out[gb->serial_length] = '\0';
             }
-            gb->serial_timer = 8 * 512; /* 8192 Hz internal clock */
+            gb->serial_timer = 8; /* bits left to shift */
         }
         return;
     case 0xFF04: set_div_counter(gb, 0); return;
     case 0xFF05:
-        if (gb->tima_reload) gb->tima_reload = 0; /* a write during the delay cancels the reload */
+        if (gb->tima_reloaded) return; /* the reload wins over a write in the same M-cycle */
+        gb->tima_reload = 0; /* a write while TIMA reads $00 cancels the reload */
         gb->tima = v;
         return;
-    case 0xFF06: gb->tma = v; return;
+    case 0xFF06:
+        gb->tma = v;
+        if (gb->tima_reloaded) gb->tima = v; /* the reload picks up the new TMA */
+        return;
     case 0xFF07: {
         int before = timer_signal(gb, gb->div_counter);
         gb->tac = (uint8_t)(v & 7);
@@ -231,10 +253,8 @@ void gb_bus_write(Gb *gb, uint16_t a, uint8_t v) {
     }
     case 0xFF0F: gb->if_reg = (uint8_t)(v & 0x1F); return;
     case 0xFF46:
-        gb->dma_active = 1;
-        gb->dma_delay = 1;
-        gb->dma_index = 0;
-        gb->dma_source = (uint16_t)(v << 8);
+        gb->dma_pending = 2;
+        gb->dma_pending_source = (uint16_t)(v << 8);
         gb_ppu_write(gb, a, v);
         return;
     default: break;

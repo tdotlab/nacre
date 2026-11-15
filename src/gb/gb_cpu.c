@@ -10,20 +10,40 @@
 #define FH 0x20u
 #define FC 0x10u
 
+/* $FE00-$FEFF on the address bus during the PPU's OAM scan triggers the OAM bug;
+ * the 16-bit increment/decrement unit drives the bus too (see gb_oam_bug). */
+#define OAM_RANGE(a) ((a) >= 0xFE00 && (a) < 0xFF00)
+
 static uint8_t rd(Gb *g, uint16_t address) {
     gb_tick(g);
+    if (OAM_RANGE(address)) gb_oam_bug(g, GB_OAM_BUG_READ);
     return gb_bus_read(g, address);
 }
 
+/* A read whose address register is incremented or decremented in the same M-cycle. */
+static uint8_t rd_idu(Gb *g, uint16_t address) {
+    gb_tick(g);
+    if (OAM_RANGE(address)) gb_oam_bug(g, GB_OAM_BUG_READ_IDU);
+    return gb_bus_read(g, address);
+}
+
+/* A write, with or without an increment/decrement: either way one write corruption. */
 static void wr(Gb *g, uint16_t address, uint8_t value) {
     gb_tick(g);
+    if (OAM_RANGE(address)) gb_oam_bug(g, GB_OAM_BUG_WRITE);
     gb_bus_write(g, address, value);
 }
 
 static void idle(Gb *g) { gb_tick(g); }
 
+/* An internal M-cycle in which the IDU increments or decrements this value. */
+static void idu(Gb *g, uint16_t value) {
+    gb_tick(g);
+    if (OAM_RANGE(value)) gb_oam_bug(g, GB_OAM_BUG_WRITE);
+}
+
 static uint8_t fetch(Gb *g) {
-    uint8_t value = rd(g, g->pc);
+    uint8_t value = rd_idu(g, g->pc);
     g->pc++;
     return value;
 }
@@ -87,6 +107,7 @@ static void set_r8(Gb *g, int i, uint8_t v) {
     }
 }
 
+/* Callers run the internal M-cycle with the implied SP decrement first (idu). */
 static void push16(Gb *g, uint16_t v) {
     g->sp--;
     wr(g, g->sp, (uint8_t)(v >> 8));
@@ -95,7 +116,7 @@ static void push16(Gb *g, uint16_t v) {
 }
 
 static uint16_t pop16(Gb *g) {
-    uint8_t lo = rd(g, g->sp++);
+    uint8_t lo = rd_idu(g, g->sp++); /* the second read does not glitch a write */
     uint8_t hi = rd(g, g->sp++);
     return (uint16_t)(lo | (hi << 8));
 }
@@ -217,7 +238,7 @@ static void lock_up(Gb *g, uint8_t op) {
 static void dispatch_interrupt(Gb *g) {
     uint8_t pending;
     g->ime = 0;
-    idle(g);
+    idu(g, g->sp);
     g->sp--;
     wr(g, g->sp, (uint8_t)(g->pc >> 8));
     /* The vector is chosen after the high byte push, which may have written IE. */
@@ -287,6 +308,7 @@ void gb_cpu_step(Gb *g) {
         dispatch_interrupt(g);
         return;
     }
+    if (OAM_RANGE(g->pc)) gb_oam_bug(g, GB_OAM_BUG_READ_IDU);
     op = gb_bus_read(g, g->pc);
     if (g->halt_bug) {
         g->halt_bug = 0; /* the byte after HALT is read twice */
@@ -327,17 +349,21 @@ void gb_cpu_step(Gb *g) {
     case 0x32: { uint16_t hl = get_hl(g); wr(g, hl, g->a); set_hl(g, (uint16_t)(hl - 1)); break; }
     case 0x0A: g->a = rd(g, get_bc(g)); break;
     case 0x1A: g->a = rd(g, get_de(g)); break;
-    case 0x2A: { uint16_t hl = get_hl(g); g->a = rd(g, hl); set_hl(g, (uint16_t)(hl + 1)); break; }
-    case 0x3A: { uint16_t hl = get_hl(g); g->a = rd(g, hl); set_hl(g, (uint16_t)(hl - 1)); break; }
+    case 0x2A: { uint16_t hl = get_hl(g); g->a = rd_idu(g, hl); set_hl(g, (uint16_t)(hl + 1)); break; }
+    case 0x3A: { uint16_t hl = get_hl(g); g->a = rd_idu(g, hl); set_hl(g, (uint16_t)(hl - 1)); break; }
 
-    case 0x03: case 0x13: case 0x23: case 0x33:
-        set_rp(g, op >> 4, (uint16_t)(get_rp(g, op >> 4) + 1));
-        idle(g);
+    case 0x03: case 0x13: case 0x23: case 0x33: {
+        uint16_t v = get_rp(g, op >> 4);
+        idu(g, v);
+        set_rp(g, op >> 4, (uint16_t)(v + 1));
         break;
-    case 0x0B: case 0x1B: case 0x2B: case 0x3B:
-        set_rp(g, op >> 4, (uint16_t)(get_rp(g, op >> 4) - 1));
-        idle(g);
+    }
+    case 0x0B: case 0x1B: case 0x2B: case 0x3B: {
+        uint16_t v = get_rp(g, op >> 4);
+        idu(g, v);
+        set_rp(g, op >> 4, (uint16_t)(v - 1));
         break;
+    }
     case 0x09: case 0x19: case 0x29: case 0x39: {
         unsigned hl = get_hl(g);
         unsigned rp = get_rp(g, op >> 4);
@@ -423,10 +449,10 @@ void gb_cpu_step(Gb *g) {
     case 0xD1: set_de(g, pop16(g)); break;
     case 0xE1: set_hl(g, pop16(g)); break;
     case 0xF1: { uint16_t v = pop16(g); g->a = (uint8_t)(v >> 8); g->f = (uint8_t)(v & 0xF0); break; }
-    case 0xC5: idle(g); push16(g, get_bc(g)); break;
-    case 0xD5: idle(g); push16(g, get_de(g)); break;
-    case 0xE5: idle(g); push16(g, get_hl(g)); break;
-    case 0xF5: idle(g); push16(g, (uint16_t)((g->a << 8) | g->f)); break;
+    case 0xC5: idu(g, g->sp); push16(g, get_bc(g)); break;
+    case 0xD5: idu(g, g->sp); push16(g, get_de(g)); break;
+    case 0xE5: idu(g, g->sp); push16(g, get_hl(g)); break;
+    case 0xF5: idu(g, g->sp); push16(g, (uint16_t)((g->a << 8) | g->f)); break;
 
     case 0xC2: case 0xCA: case 0xD2: case 0xDA: { /* JP cc,nn */
         uint16_t addr = fetch16(g);
@@ -442,7 +468,7 @@ void gb_cpu_step(Gb *g) {
     case 0xC4: case 0xCC: case 0xD4: case 0xDC: { /* CALL cc,nn */
         uint16_t addr = fetch16(g);
         if (condition(g, (op >> 3) & 3)) {
-            idle(g);
+            idu(g, g->sp);
             push16(g, g->pc);
             g->pc = addr;
         }
@@ -450,14 +476,14 @@ void gb_cpu_step(Gb *g) {
     }
     case 0xCD: {
         uint16_t addr = fetch16(g);
-        idle(g);
+        idu(g, g->sp);
         push16(g, g->pc);
         g->pc = addr;
         break;
     }
 
     case 0xC7: case 0xCF: case 0xD7: case 0xDF: case 0xE7: case 0xEF: case 0xF7: case 0xFF:
-        idle(g);
+        idu(g, g->sp);
         push16(g, g->pc);
         g->pc = (uint16_t)(op & 0x38);
         break;
