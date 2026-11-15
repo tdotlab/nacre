@@ -512,7 +512,7 @@ void render(Graphics &gfx, const RECT &clip) {
         for (const Cap &cap : caps)
             keycap(26.0f + cap.col * 44, 444.0f + cap.row * 39, cap.cols * 44 - 8, cap.label,
                    g.gb_keys[cap.button], cap.size);
-        draw_text(gfx, L"Arrows  ·  X is A  ·  Z is B", 26, 610, 190, 18, 10, UI, 0x7F847A);
+        draw_text(gfx, L"Arrows or WASD  ·  X/K is A  ·  Z/J is B", 26, 610, 190, 18, 10, UI, 0x7F847A);
         draw_text(gfx, L"Space to pause  ·  M to mute", 26, 628, 190, 18, 10, UI, 0x7F847A);
         draw_text(gfx, L"GAME BOY  /  160 × 144", 26, h - 36, 180, 18, 10, MONO, 0x878C80);
     } else {
@@ -1175,8 +1175,8 @@ int chip_key(UINT scan) {
     }
 }
 
-/* Game Boy buttons: arrows for the D-pad, X and Z where a Game Boy's A and B sit,
- * Enter for Start, Backspace or right Shift for Select. */
+/* Game Boy buttons: arrows or WASD for the D-pad, X/K for A and Z/J for B, Enter
+ * for Start, Backspace or right Shift for Select. */
 int gb_key(UINT scan, bool extended) {
     if (extended) {
         switch (scan) {
@@ -1187,7 +1187,10 @@ int gb_key(UINT scan, bool extended) {
         }
     }
     switch (scan) {
-    case 0x2D: return GB_BUTTON_A;      case 0x2C: return GB_BUTTON_B;
+    case 0x2D: case 0x25: return GB_BUTTON_A; /* X, K */
+    case 0x2C: case 0x24: return GB_BUTTON_B; /* Z, J */
+    case 0x11: return GB_BUTTON_UP;     case 0x1F: return GB_BUTTON_DOWN;   /* W, S */
+    case 0x1E: return GB_BUTTON_LEFT;   case 0x20: return GB_BUTTON_RIGHT;  /* A, D */
     case 0x1C: return GB_BUTTON_START;
     case 0x0E: case 0x36: return GB_BUTTON_SELECT;
     default: return -1;

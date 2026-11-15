@@ -73,7 +73,7 @@ bytes, so it still works if the original file was moved.
 | Action | Mac | Windows | SDL frontend (Linux) |
 | --- | --- | --- | --- |
 | CHIP-8 keypad | `1–4`, `QWER`, `ASDF`, `ZXCV` | Same (by physical key position) | Same |
-| Game Boy buttons | Arrows, `X` = A, `Z` = B, `Return` = Start, `Delete` or right `Shift` = Select | Arrows, `X` = A, `Z` = B, `Enter` = Start, `Backspace` or right `Shift` = Select | Same |
+| Game Boy buttons | Arrows or `WASD`, `X`/`K` = A, `Z`/`J` = B, `Return` = Start, `Delete` or right `Shift` = Select | Arrows or `WASD`, `X`/`K` = A, `Z`/`J` = B, `Enter` = Start, `Backspace` or right `Shift` = Select | Same |
 | Game Boy speed / palette | Sidebar popups | Sidebar or Session/View menus | `F3` / `F4` (shown in the title bar) |
 | Pause / resume | `Space` or `⌘P` | `Space` or `Ctrl+P` | `Space` |
 | Restart ROM | `⌘R` or `F2` | `Ctrl+R` or `F2` | `F2` |

@@ -78,13 +78,16 @@ static int chip_key(unsigned short code) {
         default:return -1;
     }
 }
-/* Arrows for the D-pad, X and Z for A and B, Return for Start, Delete or the
- * right Shift for Select; physical key codes again. */
+/* Arrows or WASD for the D-pad, X/K for A and Z/J for B, Return for Start, Delete
+ * or the right Shift for Select; physical key codes again. */
 static int gb_button(unsigned short code) {
     switch (code) {
         case 124: return GB_BUTTON_RIGHT; case 123: return GB_BUTTON_LEFT;
         case 126: return GB_BUTTON_UP; case 125: return GB_BUTTON_DOWN;
-        case 7: return GB_BUTTON_A; case 6: return GB_BUTTON_B;
+        case 13: return GB_BUTTON_UP; case 1: return GB_BUTTON_DOWN;   /* W, S */
+        case 0: return GB_BUTTON_LEFT; case 2: return GB_BUTTON_RIGHT; /* A, D */
+        case 7: case 40: return GB_BUTTON_A; /* X, K */
+        case 6: case 38: return GB_BUTTON_B; /* Z, J */
         case 51: case 60: return GB_BUTTON_SELECT;
         case 36: case 76: return GB_BUTTON_START;
         default: return -1;
@@ -282,7 +285,7 @@ static void timer_tick(Chip8 *chip8, void *userdata) {
             keycap(26 + caps[i].col * 44, 444 + caps[i].row * 39, caps[i].cols * 44 - 8,
                    [NSString stringWithUTF8String:caps[i].label], c->gbHeld[caps[i].button] != 0,
                    caps[i].size);
-        text(@"Arrows  ·  X is A  ·  Z is B", NSMakeRect(26, 610, 190, 18), 10,
+        text(@"Arrows or WASD  ·  X/K is A  ·  Z/J is B", NSMakeRect(26, 610, 190, 18), 10,
              NSFontWeightRegular, 0x7F847A, NO);
         text(@"Space to pause  ·  M to mute", NSMakeRect(26, 628, 190, 18), 10,
              NSFontWeightRegular, 0x7F847A, NO);

@@ -383,15 +383,21 @@ static int key_for_scancode(SDL_Scancode scancode) {
     }
 }
 
-/* Arrows for the D-pad, X and Z where a Game Boy's A and B sit, Enter for
- * Start, Backspace or right Shift for Select. */
+/* Arrows or WASD for the D-pad, X/K for A and Z/J for B, Enter for Start,
+ * Backspace or right Shift for Select. */
 static int gb_button_for_scancode(SDL_Scancode scancode) {
     switch (scancode) {
+        case SDL_SCANCODE_W:
         case SDL_SCANCODE_UP: return GB_BUTTON_UP;
+        case SDL_SCANCODE_S:
         case SDL_SCANCODE_DOWN: return GB_BUTTON_DOWN;
+        case SDL_SCANCODE_A:
         case SDL_SCANCODE_LEFT: return GB_BUTTON_LEFT;
+        case SDL_SCANCODE_D:
         case SDL_SCANCODE_RIGHT: return GB_BUTTON_RIGHT;
+        case SDL_SCANCODE_K:
         case SDL_SCANCODE_X: return GB_BUTTON_A;
+        case SDL_SCANCODE_J:
         case SDL_SCANCODE_Z: return GB_BUTTON_B;
         case SDL_SCANCODE_RETURN:
         case SDL_SCANCODE_KP_ENTER: return GB_BUTTON_START;
