@@ -3,9 +3,9 @@
 ## Current state
 
 Nacre has a C core, independent 60 Hz timer scheduling, real timer-driven sound,
-a terminal/headless interface, a native AppKit Mac app, and an SDL3 Windows/Linux
-frontend. See [architecture](ARCHITECTURE.md) for source ownership and
-[README](../README.md) for setup and controls.
+a terminal/headless interface, a native AppKit Mac app, a native Win32/GDI+ Windows
+app, and an SDL3 Linux frontend. See [architecture](ARCHITECTURE.md) for source
+ownership and [README](../README.md) for setup and controls.
 
 The Mac design adds warm pearl chrome, a dark integer-scaled display, three
 phosphor palettes, native buttons and file sheets, recent files, drag-and-drop,
@@ -18,9 +18,26 @@ The Mac interface build, native control/key smoke checks, and capture passed in
 [CI run 43649531447](https://github.com/tdotlab/nacre/actions/runs/43649531447);
 Windows and Linux builds also passed. Automated UI capture and compilation
 are separate from hands-on input/audio acceptance. Live sound still needs a
-listening check on real devices. Windows/Linux visual parity is not implemented.
+listening check on real devices. Linux visual parity is not implemented.
+
+The Windows app mirrors the Mac design (sidebar, display well, palettes, keycaps,
+native menus/dialogs, drag-and-drop, recents, saved preferences, generated icon,
+embedded welcome ROM) as one static exe. It builds warning-free at /W4 with MSVC,
+and its `--snapshot` self-check (pause, mute, restart, physical key down/up, then a
+window capture) passes locally. A local run also showed Pong and Tetris rendering,
+held-key keycaps, pause state, key delivery through a focused sidebar button, and
+the error dialog for an empty ROM. Not yet checked by a person on real hardware:
+audible sound, the Open dialog, drag-and-drop from Explorer, the speed/palette
+menus, fullscreen, high-DPI and multi-monitor moves, recent files across
+restarts, and Narrator.
 
 ## Next acceptance pass
+
+For Windows: run the CI artifact on a clean Windows 10 and 11 machine (SmartScreen
+will warn about the unsigned exe), then walk the same checklist below using the
+Open button, File menu, recent files, and dragging from Explorer. Also check
+200% display scaling, moving between monitors of different DPI, F11/Esc, a ROM
+path with spaces or non-ASCII characters, and Narrator on the sidebar buttons.
 
 Have the friend launch the downloaded, quarantined app from Finder, open ROMs
 using the button, menu, recent files, and drag-and-drop, then check keyboard input,
@@ -42,9 +59,11 @@ Refine the Mac interface using actual play feedback. The original shell artwork 
 drawn in code and used for the running app's Dock icon and generated Finder icon.
 Both use the same source in `src/macos/branding.h`. Native buttons have accessibility labels;
 full VoiceOver coverage of the custom display/key guide remains open.
-Adapt the design to Windows with the same core APIs. Choose the Windows UI toolkit
-for accessible controls before copying custom drawing. Linux packaging follows
-when there is a tester and target distribution.
+The Windows shell uses native BUTTON controls (owner-drawn) so focus and names stay
+accessible; the custom display and keycap guide have no accessible description yet.
+Windows still needs code signing before a normal download and an installer or
+portable-zip decision. Linux packaging follows when there is a tester and target
+distribution.
 
 ## Before a normal release
 

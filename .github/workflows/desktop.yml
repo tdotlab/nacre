@@ -22,8 +22,8 @@ jobs:
             platform: Windows
             artifact_path: |
               build/Release/Nacre.exe
-              build/Release/assets/hello.ch8
               build/Release/THIRD_PARTY_NOTICES.txt
+              build/Release/Nacre-preview.png
           - os: ubuntu-latest
             platform: Linux
             artifact_path: |
@@ -68,6 +68,16 @@ jobs:
         timeout-minutes: 2
         if: runner.os == 'macOS'
         run: build/Nacre.app/Contents/MacOS/Nacre --snapshot build/artifact/Nacre-preview.png
+      - name: Launch Windows app and capture interface
+        timeout-minutes: 2
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Nacre is a GUI-subsystem program, so wait on it explicitly to get its exit code.
+          $exe = Join-Path $PWD 'build/Release/Nacre.exe'
+          $png = Join-Path $PWD 'build/Release/Nacre-preview.png'
+          $p = Start-Process -FilePath $exe -ArgumentList '--snapshot', $png -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Nacre --snapshot exited with code $($p.ExitCode)" }
       - name: Upload app
         uses: actions/upload-artifact@v4
         with:

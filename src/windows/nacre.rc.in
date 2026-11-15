@@ -1,0 +1,34 @@
+#include <windows.h>
+
+/* Configured by CMake. The icon is generated from src/windows/branding.h and the
+ * welcome ROM is embedded so Nacre.exe starts without any files beside it. */
+1 ICON "@NACRE_ICON_PATH@"
+NACRE_ROM RCDATA "@NACRE_ROM_PATH@"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+PRODUCTVERSION @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+FILEFLAGSMASK 0x3fL
+FILEFLAGS 0x0L
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "tdotlab"
+            VALUE "FileDescription", "Nacre CHIP-8 interpreter"
+            VALUE "FileVersion", "@PROJECT_VERSION@"
+            VALUE "InternalName", "Nacre"
+            VALUE "OriginalFilename", "Nacre.exe"
+            VALUE "ProductName", "Nacre"
+            VALUE "ProductVersion", "@PROJECT_VERSION@"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

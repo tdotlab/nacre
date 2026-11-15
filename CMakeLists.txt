@@ -2,6 +2,11 @@ cmake_minimum_required(VERSION 3.20)
 project(Nacre VERSION 0.2.0 LANGUAGES C)
 if(APPLE)
     enable_language(OBJC)
+elseif(WIN32)
+    enable_language(CXX)
+    enable_language(RC)
+    # Link the C runtime statically so Nacre.exe runs without a redistributable.
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
 include(FetchContent)
@@ -38,7 +43,12 @@ if(APPLE)
     target_compile_options(nacre-desktop PRIVATE -fobjc-arc)
     target_link_libraries(nacre-desktop PRIVATE "-framework Cocoa" "-framework UniformTypeIdentifiers")
 elseif(WIN32)
-    add_executable(nacre-desktop WIN32 src/desktop/main.c)
+    add_executable(nacre-desktop WIN32 src/windows/main.cpp src/windows/nacre.manifest)
+    set_target_properties(nacre-desktop PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+    target_compile_definitions(nacre-desktop PRIVATE
+        NACRE_VERSION="${PROJECT_VERSION}" UNICODE _UNICODE NOMINMAX)
+    target_link_libraries(nacre-desktop PRIVATE
+        gdiplus comctl32 dwmapi shell32 ole32 uuid winmm advapi32 user32 gdi32)
 else()
     add_executable(nacre-desktop src/desktop/main.c)
 endif()
@@ -73,6 +83,30 @@ if(APPLE)
         MACOSX_PACKAGE_LOCATION Resources
     )
     target_sources(nacre-desktop PRIVATE assets/roms/nacre.ch8 "${SDL3_SOURCE_DIR}/LICENSE.txt")
+elseif(WIN32)
+    # The icon is drawn from src/windows/branding.h at build time, like the Mac icon,
+    # and embedded with the welcome ROM so Nacre.exe starts without sidecar files.
+    add_executable(nacre-icon EXCLUDE_FROM_ALL tools/windows-icon.cpp)
+    set_target_properties(nacre-icon PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+    target_compile_definitions(nacre-icon PRIVATE UNICODE _UNICODE NOMINMAX)
+    target_link_libraries(nacre-icon PRIVATE gdiplus ole32 uuid)
+    set(NACRE_ICON_PATH "${CMAKE_CURRENT_BINARY_DIR}/Nacre.ico")
+    set(NACRE_ROM_PATH "${CMAKE_CURRENT_SOURCE_DIR}/assets/roms/nacre.ch8")
+    add_custom_command(OUTPUT "${NACRE_ICON_PATH}"
+        COMMAND nacre-icon "${NACRE_ICON_PATH}"
+        DEPENDS nacre-icon src/windows/branding.h tools/windows-icon.cpp
+        VERBATIM)
+    configure_file(src/windows/nacre.rc.in "${CMAKE_CURRENT_BINARY_DIR}/nacre.rc" @ONLY)
+    set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/nacre.rc" PROPERTIES
+        OBJECT_DEPENDS "${NACRE_ICON_PATH};${NACRE_ROM_PATH}")
+    target_sources(nacre-desktop PRIVATE
+        "${CMAKE_CURRENT_BINARY_DIR}/nacre.rc" "${NACRE_ICON_PATH}")
+    add_custom_command(TARGET nacre-desktop POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${SDL3_SOURCE_DIR}/LICENSE.txt"
+                "$<TARGET_FILE_DIR:nacre-desktop>/THIRD_PARTY_NOTICES.txt"
+        VERBATIM
+    )
 else()
     add_custom_command(TARGET nacre-desktop POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory
@@ -89,7 +123,7 @@ endif()
 
 if(MSVC)
     target_compile_options(nacre_core PRIVATE /W4)
-    target_compile_options(nacre-desktop PRIVATE /W4)
+    target_compile_options(nacre-desktop PRIVATE /W4 /utf-8)
 else()
     target_compile_options(nacre_core PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(nacre-desktop PRIVATE -Wall -Wextra -Wpedantic)

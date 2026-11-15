@@ -1,7 +1,8 @@
 # Project guidance
 
-Nacre has a shared C CHIP-8 core, an AppKit Mac interface, a portable SDL3
-frontend for Windows/Linux, and a terminal/headless frontend. Keep OS-specific
+Nacre has a shared C CHIP-8 core, an AppKit Mac interface, a native Win32/GDI+
+Windows interface (`src/windows/`), an SDL3 frontend for Linux, and a
+terminal/headless frontend. Keep OS-specific
 interface and packaging code outside the emulator core. Keep `chip8_*` and `CHIP8_*` identifiers for
 the emulated architecture; use Nacre for product branding.
 

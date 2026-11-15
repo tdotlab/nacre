@@ -1,6 +1,6 @@
 # Nacre
 
-A compact CHIP-8 interpreter with a native Mac app, a portable SDL3 frontend, and a terminal interface. All three use the same C emulator core and sound oscillator.
+A compact CHIP-8 interpreter with native Mac and Windows apps, a portable SDL3 frontend for Linux, and a terminal interface. All of them use the same C emulator core and sound oscillator.
 
 ![Nacre Mac interface](screenshots/nacre-macos.png)
 
@@ -38,13 +38,15 @@ z x c v        A 0 B F
 
 ## Desktop app
 
-The Mac app pairs a warm pearl sidebar with a dark, pixel-perfect display. It has
-native menus and file sheets, drag-and-drop ROM loading, recent files, a live
-keyboard guide, pause/restart/sound buttons, and Fern, Amber, and Pearl palettes.
-Speed, palette, and mute preferences are saved automatically. The emulator pauses
+The Mac and Windows apps share one design: a warm pearl sidebar beside a dark,
+pixel-perfect display. Both have native menus and file dialogs, drag-and-drop ROM
+loading, recent files, a live keyboard guide, pause/restart/sound buttons, and Fern,
+Amber, and Pearl palettes. Speed, palette, and mute preferences are saved
+automatically (Windows also remembers the window position). The emulator pauses
 and releases held keys when the window loses focus.
 
-Build with CMake 3.20+ and a C compiler (Xcode Command Line Tools on Mac):
+Build with CMake 3.20+ and a C compiler (Xcode Command Line Tools on Mac, Visual
+Studio 2022+ or Build Tools with the C++ workload on Windows):
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -53,23 +55,26 @@ cmake --build build --config Release
 
 The first configure downloads pinned SDL3 source. SDL3 is linked statically and
 its license is bundled. Mac uses AppKit for the interface and SDL3 for audio;
-Windows and Linux currently retain the basic SDL3 window. Their visual adaptation
-is future work; the emulator core stays shared.
+Windows uses plain Win32 and GDI+ for the interface (no extra runtime needed) and
+SDL3 for audio. Linux still uses the basic SDL3 window. The emulator core is shared.
 
-The Mac result is `build/Nacre.app`; Windows and Linux produce `Nacre` alongside
-`assets/hello.ch8` and `THIRD_PARTY_NOTICES.txt`. Launch opens the bundled demo.
-Use Open ROM, drag a file onto the Mac window, or select File → Open Recent.
-Restart uses the loaded bytes, so it still works if the original file was moved.
+The Mac result is `build/Nacre.app`. Windows produces a single `Nacre.exe` (icon and
+welcome ROM are built in) plus `THIRD_PARTY_NOTICES.txt`; with a multi-config
+generator such as Visual Studio it lands in `build/Release/`. Linux produces `Nacre`
+alongside `assets/hello.ch8` and `THIRD_PARTY_NOTICES.txt`. Launch opens the
+bundled demo. Use Open ROM, drag a file onto the window, or pick File → Open Recent
+(Windows also accepts a ROM path on the command line). Restart uses the loaded
+bytes, so it still works if the original file was moved.
 
-| Action | Mac | SDL frontend |
-| --- | --- | --- |
-| CHIP-8 keypad | `1–4`, `QWER`, `ASDF`, `ZXCV` | Same |
-| Pause / resume | `Space` or `⌘P` | `Space` |
-| Restart ROM | `⌘R` or `F2` | `F2` |
-| Sound | `M` | `M` |
-| Open ROM | `⌘O` | `Ctrl+O` |
-| Full screen | View menu / `⌃⌘F` | Window manager |
-| Quit | `⌘Q` | `Ctrl+Q` / `Esc` |
+| Action | Mac | Windows | SDL frontend (Linux) |
+| --- | --- | --- | --- |
+| CHIP-8 keypad | `1–4`, `QWER`, `ASDF`, `ZXCV` | Same (by physical key position) | Same |
+| Pause / resume | `Space` or `⌘P` | `Space` or `Ctrl+P` | `Space` |
+| Restart ROM | `⌘R` or `F2` | `Ctrl+R` or `F2` | `F2` |
+| Sound | `M` | `M` | `M` |
+| Open ROM | `⌘O` | `Ctrl+O` | `Ctrl+O` |
+| Full screen | View menu / `⌃⌘F` | `F11` or `Alt+Enter` (`Esc` leaves) | Window manager |
+| Quit | `⌘Q` | `Ctrl+Q` | `Ctrl+Q` / `Esc` |
 
 The [Desktop builds workflow](https://github.com/tdotlab/nacre/actions/workflows/desktop.yml)
 uploads unsigned artifacts. Mac CI targets macOS 11+ with both Intel and Apple
@@ -79,11 +84,18 @@ These automated checks do not establish audible output or real MacBook acceptanc
 The preview is unsigned and unnotarized. A normal downloadable release still needs
 signing and notarization.
 
+Windows CI builds with the MSVC toolchain, runs the same style of self-check
+(pause, mute, restart, physical key down/up, then a capture of the real window),
+and uploads the unsigned `Nacre.exe`. Windows SmartScreen will warn about it until
+it is code-signed. Those checks do not establish audible output or hands-on
+acceptance on real hardware.
+
 Linux build dependencies are listed in `.github/workflows/desktop.yml`.
-For a Mac UI capture from a built bundle:
+For a UI capture from a built app:
 
 ```sh
-build/Nacre.app/Contents/MacOS/Nacre --snapshot /absolute/path/preview.png
+build/Nacre.app/Contents/MacOS/Nacre --snapshot /absolute/path/preview.png   # Mac
+build\Release\Nacre.exe --snapshot C:\absolute\path\preview.png              # Windows
 ```
 
 ## Interpreter behavior
