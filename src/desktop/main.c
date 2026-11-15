@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define WINDOW_WIDTH 960
@@ -22,6 +23,7 @@ enum {
 typedef struct {
     SDL_AudioStream *stream;
     SDL_AtomicInt active;
+    SDL_AtomicInt active_samples;
     Chip8AudioOscillator oscillator;
 } DesktopAudio;
 
@@ -44,6 +46,27 @@ typedef struct {
     bool quit_requested;
 } App;
 
+#define MAX_SCRIPTED_KEYS 64
+#define DEFAULT_TEST_CYCLES 300u
+
+typedef struct {
+    uint32_t at;
+    uint8_t key;
+    bool pressed;
+} ScriptedKey;
+
+/* Deterministic test mode: run a fixed number of CPU cycles, inject real SDL
+ * key events at chosen cycle counts, then capture the rendered window. */
+typedef struct {
+    bool headless;
+    const char *rom_path;
+    const char *snapshot_path;
+    const char *dump_path;
+    uint32_t cycles;
+    ScriptedKey keys[MAX_SCRIPTED_KEYS];
+    size_t key_count;
+} Options;
+
 static const SDL_DialogFileFilter rom_filters[] = {
     { "CHIP-8 ROMs", "ch8;rom;bin" },
     { "All files", "*" }
@@ -63,6 +86,7 @@ static void SDLCALL audio_callback(void *userdata, SDL_AudioStream *stream,
         int active = SDL_GetAtomicInt(&audio->active) != 0;
         chip8_audio_render_samples(&audio->oscillator, samples,
                                    (size_t)count, active);
+        if (active) SDL_AddAtomicInt(&audio->active_samples, count);
         if (!SDL_PutAudioStreamData(stream, samples,
                                     count * (int)sizeof(samples[0]))) {
             return;
@@ -193,6 +217,16 @@ static int key_for_scancode(SDL_Scancode scancode) {
     }
 }
 
+static SDL_Scancode scancode_for_key(uint8_t key) {
+    static const SDL_Scancode map[16] = {
+        SDL_SCANCODE_X, SDL_SCANCODE_1, SDL_SCANCODE_2, SDL_SCANCODE_3,
+        SDL_SCANCODE_Q, SDL_SCANCODE_W, SDL_SCANCODE_E, SDL_SCANCODE_A,
+        SDL_SCANCODE_S, SDL_SCANCODE_D, SDL_SCANCODE_Z, SDL_SCANCODE_C,
+        SDL_SCANCODE_4, SDL_SCANCODE_R, SDL_SCANCODE_F, SDL_SCANCODE_V
+    };
+    return map[key & 0xF];
+}
+
 static void release_keys(App *app) {
     for (uint8_t key = 0; key < 16; key++) {
         chip8_set_key(&app->machine, key, 0);
@@ -281,7 +315,7 @@ static void handle_event(App *app, SDL_Event *event) {
     }
 }
 
-static int render_frame(App *app) {
+static int draw_frame(App *app) {
     uint8_t pixels[CHIP8_DISPLAY_WIDTH * CHIP8_DISPLAY_HEIGHT * 4];
     for (size_t i = 0; i < CHIP8_DISPLAY_WIDTH * CHIP8_DISPLAY_HEIGHT; i++) {
         uint8_t value = app->machine.display[i] ? 255 : 0;
@@ -313,6 +347,11 @@ static int render_frame(App *app) {
         !SDL_RenderTexture(app->renderer, app->framebuffer, NULL, &destination)) {
         return 0;
     }
+    return 1;
+}
+
+static int render_frame(App *app) {
+    if (!draw_frame(app)) return 0;
     SDL_RenderPresent(app->renderer);
     return 1;
 }
@@ -416,17 +455,154 @@ static void cleanup(App *app) {
     if (app->sdl_initialized) SDL_Quit();
 }
 
+static int parse_key_script(Options *options, const char *spec) {
+    unsigned key, at, hold;
+    if (sscanf(spec, "%x@%u+%u", &key, &at, &hold) != 3 || key > 0xF ||
+        hold == 0 || options->key_count + 2 > MAX_SCRIPTED_KEYS) {
+        return 0;
+    }
+    options->keys[options->key_count++] = (ScriptedKey){ at, (uint8_t)key, true };
+    options->keys[options->key_count++] = (ScriptedKey){ at + hold, (uint8_t)key, false };
+    return 1;
+}
+
+static int compare_keys(const void *a, const void *b) {
+    const ScriptedKey *left = a, *right = b;
+    if (left->at != right->at) return left->at < right->at ? -1 : 1;
+    return (int)left->pressed - (int)right->pressed;
+}
+
+static void inject_key(App *app, const ScriptedKey *scripted) {
+    SDL_Event event;
+    SDL_zero(event);
+    event.type = scripted->pressed ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
+    event.key.scancode = scancode_for_key(scripted->key);
+    event.key.down = scripted->pressed;
+    SDL_PushEvent(&event);
+    while (SDL_PollEvent(&event)) handle_event(app, &event);
+}
+
+static int write_dump(const App *app, const char *path) {
+    FILE *out = strcmp(path, "-") == 0 ? stdout : fopen(path, "w");
+    if (!out) return 0;
+    for (int y = 0; y < CHIP8_DISPLAY_HEIGHT; y++) {
+        for (int x = 0; x < CHIP8_DISPLAY_WIDTH; x++) {
+            fputc(app->machine.display[y * CHIP8_DISPLAY_WIDTH + x] ? '#' : '.', out);
+        }
+        fputc('\n', out);
+    }
+    if (out != stdout) fclose(out);
+    return 1;
+}
+
+static int run_headless(App *app, Options *options) {
+    qsort(options->keys, options->key_count, sizeof(options->keys[0]), compare_keys);
+    uint32_t done = 0;
+    size_t next = 0;
+    char error[256];
+
+    for (;;) {
+        while (next < options->key_count && options->keys[next].at <= done) {
+            inject_key(app, &options->keys[next++]);
+        }
+        if (done >= options->cycles) break;
+        uint32_t target = options->cycles;
+        if (next < options->key_count && options->keys[next].at < target) {
+            target = options->keys[next].at;
+        }
+        if (!chip8_scheduler_run_cycles(&app->machine, &app->scheduler,
+                                        target - done, timer_tick, app,
+                                        error, sizeof(error))) {
+            fprintf(stderr, "execution fault after %u cycles: %s\n", done, error);
+            return 3;
+        }
+        done = target;
+    }
+    sync_audio(app);
+
+    if (!draw_frame(app)) {
+        fprintf(stderr, "could not draw the frame: %s\n", SDL_GetError());
+        return 4;
+    }
+    if (options->snapshot_path) {
+        SDL_Surface *surface = SDL_RenderReadPixels(app->renderer, NULL);
+        if (!surface || !SDL_SavePNG(surface, options->snapshot_path)) {
+            fprintf(stderr, "could not write %s: %s\n", options->snapshot_path,
+                    SDL_GetError());
+            SDL_DestroySurface(surface);
+            return 5;
+        }
+        SDL_DestroySurface(surface);
+    }
+    SDL_RenderPresent(app->renderer);
+    if (options->dump_path && !write_dump(app, options->dump_path)) {
+        fprintf(stderr, "could not write %s\n", options->dump_path);
+        return 6;
+    }
+
+    /* The audio device runs in real time; give it a moment to pull samples. */
+    int active = SDL_GetAtomicInt(&app->audio.active);
+    if (active) SDL_Delay(150);
+    fprintf(stderr,
+            "headless ok: cycles=%u pc=0x%03X sound_timer=%u audio_available=%d "
+            "audio_active=%d audio_active_samples=%d\n",
+            done, app->machine.pc, app->machine.sound_timer,
+            app->audio_available, active,
+            SDL_GetAtomicInt(&app->audio.active_samples));
+    return 0;
+}
+
+static int parse_options(int argc, char **argv, Options *options) {
+    memset(options, 0, sizeof(*options));
+    for (int i = 1; i < argc; i++) {
+        const char *arg = argv[i];
+        bool has_value = i + 1 < argc;
+        if (strcmp(arg, "--snapshot") == 0 && has_value) {
+            options->snapshot_path = argv[++i];
+            options->headless = true;
+        } else if (strcmp(arg, "--dump") == 0 && has_value) {
+            options->dump_path = argv[++i];
+            options->headless = true;
+        } else if (strcmp(arg, "--cycles") == 0 && has_value) {
+            options->cycles = (uint32_t)strtoul(argv[++i], NULL, 10);
+            options->headless = true;
+        } else if (strcmp(arg, "--key") == 0 && has_value) {
+            if (!parse_key_script(options, argv[++i])) return 0;
+            options->headless = true;
+        } else if (arg[0] != '-' && !options->rom_path) {
+            options->rom_path = arg;
+        } else {
+            return 0;
+        }
+    }
+    if (options->headless && options->cycles == 0) options->cycles = DEFAULT_TEST_CYCLES;
+    return 1;
+}
+
 int main(int argc, char **argv) {
-    if (argc > 2) {
-        fprintf(stderr, "Usage: Nacre [path/to/rom.ch8]\n");
+    Options options;
+    if (!parse_options(argc, argv, &options)) {
+        fprintf(stderr,
+                "Usage: Nacre [rom.ch8]\n"
+                "       Nacre [rom.ch8] [--cycles N] [--key HEX@CYCLE+HOLD]...\n"
+                "             [--snapshot out.png] [--dump out.txt|-]\n"
+                "Test mode runs N CPU cycles without opening a visible loop,\n"
+                "injects keypad events at the given cycle counts, and captures\n"
+                "the rendered window and/or the framebuffer.\n");
         return 2;
     }
 
     App app;
     memset(&app, 0, sizeof(app));
-    if (!initialize(&app, argc == 2 ? argv[1] : NULL)) {
+    if (!initialize(&app, options.rom_path)) {
         cleanup(&app);
         return 1;
+    }
+
+    if (options.headless) {
+        int status = run_headless(&app, &options);
+        cleanup(&app);
+        return status;
     }
 
     uint64_t previous = SDL_GetTicksNS();

@@ -80,6 +80,24 @@ The preview is unsigned and unnotarized. A normal downloadable release still nee
 signing and notarization.
 
 Linux build dependencies are listed in `.github/workflows/desktop.yml`.
+
+The SDL3 frontend (Windows/Linux) has a deterministic test mode for driving it
+without a person or a real-time clock. It runs a fixed number of CPU cycles,
+injects keypad events at chosen cycle counts through the normal SDL event path,
+and captures the rendered window and/or the framebuffer:
+
+```sh
+# 600 cycles; press key 5 at cycle 100 and release it 30 cycles later
+xvfb-run -a build/Nacre assets/roms/nacre.ch8 --cycles 600 \
+    --key 5@100+30 --snapshot out.png --dump -
+```
+
+`--key HEX@CYCLE+HOLD` may be repeated. On a headless Linux box use Xvfb and
+`SDL_AUDIODRIVER=dummy`; the final status line reports the sound timer and how
+many samples the audio callback produced. `tests/linux-desktop-smoke.sh` wraps
+this as a regression check. Note that `xvfb-run` merges the app's stderr into
+stdout.
+
 For a Mac UI capture from a built bundle:
 
 ```sh
@@ -92,8 +110,10 @@ Nacre implements the classic CHIP-8 instruction set with these choices: `8xy6` a
 `8xyE` shift `Vx`; `Fx55` and `Fx65` leave `I` unchanged; `Bnnn` adds `V0`; and
 sprites wrap at screen edges. `Fx0A` waits for a new key press and its release.
 SUPER-CHIP and XO-CHIP are not implemented. Legacy `0nnn` system calls are ignored.
-Seven classic Timendus ROMs ran for 20,000 simulated cycles without an emulator
-error. This was a crash smoke check; their displayed results have not been reviewed.
+Timendus test suite v4.2 displays were reviewed on the Linux build: the opcode and
+flags tests match the suite's reference screenshots exactly, and the quirks test
+shows a "modern CHIP-8" profile (see [the roadmap](docs/ROADMAP.md) for details and
+what was not run).
 
 The default speed is 10 instructions per 60 Hz virtual frame (600 instructions per
 second). `--speed N` changes CPU speed without changing timer or display rates.
@@ -132,6 +152,8 @@ second. The default output path is `nacre.wav`.
 
 ## Development
 
-Run `make test` for the SDL-free scheduler and key-wait checks. The desktop source,
+Run `make test` for the SDL-free scheduler and key-wait checks, and
+`tests/linux-desktop-smoke.sh build/Nacre` (needs Xvfb) to drive the Linux desktop
+build. The desktop source,
 cross-platform build, and remaining Mac acceptance work are tracked in
 [the roadmap](docs/ROADMAP.md).

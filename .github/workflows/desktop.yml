@@ -59,6 +59,11 @@ jobs:
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
       - name: Build
         run: cmake --build build --config Release --parallel
+      - name: Drive Linux desktop app headlessly
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install --yes xvfb
+          tests/linux-desktop-smoke.sh build/Nacre
       - name: Stage macOS app bundle
         if: runner.os == 'macOS'
         run: |

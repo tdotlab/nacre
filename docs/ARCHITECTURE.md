@@ -10,10 +10,11 @@ windows, input, ROM selection, preferences, and audio devices.
 | `src/audio.c` | Shared tone generator, CLI WAV and optional SDL2 live sink |
 | `src/macos/main.m` | ARC-managed AppKit app, native menus/panels, display, controls, SDL3 audio |
 | `src/macos/Info.plist.in` | Mac identity, version, document associations, OS requirement |
-| `src/desktop/main.c` | SDL3 window/input/file picker/audio for Windows and Linux |
+| `src/desktop/main.c` | SDL3 window/input/file picker/audio for Windows and Linux; also the deterministic test mode (`--cycles`, `--key`, `--snapshot`, `--dump`) |
+| `tests/linux-desktop-smoke.sh` | Headless Linux regression check of input, rendering, and the audio callback |
 | `src/main.c` | Terminal and headless CLI |
 | `CMakeLists.txt` | Platform selection, static SDL3, bundle/resources |
-| `.github/workflows/desktop.yml` | OS builds, universal Mac artifact, native UI smoke capture |
+| `.github/workflows/desktop.yml` | OS builds, universal Mac artifact, native UI smoke capture, Linux headless smoke |
 
 ## Thread and state ownership
 

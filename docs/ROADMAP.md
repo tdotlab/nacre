@@ -14,6 +14,10 @@ The universal build targets macOS 11+. Its CI snapshot mode exercises pause,
 mute, restart, and keypad down/up, then captures the real view.
 
 Core, scheduler, and original welcome-ROM tests pass locally and in Linux CI.
+The Linux SDL3 build can be driven headlessly (Xvfb, dummy audio) with scripted
+keypad events and frame capture, so input dispatch, rendering, and the audio
+callback are checked in CI without a Mac or a person. That covers the shared core
+and the SDL frontend only; it does not exercise the AppKit interface.
 The Mac interface build, native control/key smoke checks, and capture passed in
 [CI run 43649531447](https://github.com/tdotlab/nacre/actions/runs/43649531447);
 Windows and Linux builds also passed. Automated UI capture and compilation
@@ -29,10 +33,27 @@ Try cancelling a sheet, a moved recent file, an oversized ROM, and a ROM that
 fails at execution. Current-session preservation and recovery need human review.
 Record macOS version and Intel/Apple Silicon architecture with results.
 
-Review Timendus opcode, flags, keypad, and quirks test displays. Earlier automated
-runs executed seven classic ROMs for 20,000 cycles without errors; that does not
-establish correct displayed results or compatibility. The current profile uses
-Vx shifts, unchanged I on register transfer, V0 jump offset, and wrapping sprites.
+Timendus test suite v4.2 displays, reviewed by running the Linux SDL3 build
+headlessly and comparing against the suite's reference screenshots (the ROMs are
+GPL-3 and are not stored here):
+
+- CHIP-8 logo and IBM logo: correct.
+- Corax+ opcode test and flags test: framebuffer is pixel-identical to the
+  reference screenshots (0 of 2048 pixels differ); every result is a tick.
+- Keypad test: Fx0A shows ALL GOOD after press and release, and nothing while
+  the key is merely held, as specified. Ex9E: holding key 7 highlights the 7 cell
+  (checked visually); keys 0, 5, A, and F each changed one cell's worth of pixels
+  (counted, not visually confirmed). ExA1 and the remaining keys were not run.
+- Quirks test: against the CHIP-8 target Nacre matches only "jumping" (V0);
+  against SUPER-CHIP modern it matches VF reset, memory, display wait, and
+  shifting, and differs on clipping and jumping. Nacre is therefore a "modern
+  CHIP-8" profile: Vx shifts, unchanged I on register transfer, V0 jump offset,
+  wrapping sprites, no VF reset, no display wait. The README documents the
+  shift, memory, jump, and wrap choices; VF reset and display wait are not
+  documented there and should be recorded as decisions. ROMs that depend on
+  original COSMAC VIP behavior may run differently.
+
+This is automated verification of the shared core on Linux, not Mac acceptance.
 SUPER-CHIP and XO-CHIP are not implemented. Legacy 0nnn instructions are ignored;
 known unsupported extension encodings should eventually produce clear errors.
 
