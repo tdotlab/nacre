@@ -7,6 +7,8 @@
 #include "scheduler.h"
 #include "audio.h"
 #include "gb.h"
+#include "gb_input.h"
+#include "../desktop/pad.h"
 
 static NSString *snapshotPath;
 static NSString *launchPath;
@@ -15,6 +17,8 @@ static int snapshotStatus;
 
 static const uint32_t CHIP_HZ[3] = {300, 600, 1000};
 static const unsigned GB_PERCENT[3] = {50, 100, 200};
+static const unsigned GB_FAST_PERCENT = 400; /* while fast-forward is held */
+#define GB_STATE_SLOTS 4
 static const NSUInteger MAX_GB_ROM = 8u << 20; /* the largest MBC5 cartridge */
 static const unsigned INKS[3] = {0xC3DCC7, 0xEBD8AF, 0xE8E9DF};
 
@@ -78,19 +82,59 @@ static int chip_key(unsigned short code) {
         default:return -1;
     }
 }
-/* Arrows or WASD for the D-pad, X/K for A and Z/J for B, Return for Start, Delete
- * or the right Shift for Select; physical key codes again. */
-static int gb_button(unsigned short code) {
+/* Game Boy keys are bound by physical key code (the same on any layout):
+ * arrows and WASD for the D-pad, X/K for A, Z/J for B, Delete or the right Shift
+ * for Select, Return or Enter for Start; Tab fast-forwards, F5 and F7 save and
+ * load, F6 changes the save slot. */
+static const int DEFAULT_KEYS[GBI_COUNT][GBI_KEYS_PER_ACTION] = {
+    {124, 2}, {123, 0}, {126, 13}, {125, 1}, /* Right, Left, Up, Down */
+    {7, 40}, {6, 38},                        /* A, B */
+    {51, 60}, {36, 76},                      /* Select, Start */
+    {48, -1}, {96, -1}, {98, -1}, {97, -1},  /* fast-forward, save, load, next slot */
+};
+static NSString *key_name(int code) {
+    static const char *const names[128] = {
+        [0]="A", [1]="S", [2]="D", [3]="F", [4]="H", [5]="G", [6]="Z", [7]="X", [8]="C", [9]="V",
+        [11]="B", [12]="Q", [13]="W", [14]="E", [15]="R", [16]="Y", [17]="T",
+        [18]="1", [19]="2", [20]="3", [21]="4", [22]="6", [23]="5", [24]="=", [25]="9", [26]="7",
+        [27]="-", [28]="8", [29]="0", [30]="]", [31]="O", [32]="U", [33]="[", [34]="I", [35]="P",
+        [36]="Return", [37]="L", [38]="J", [39]="'", [40]="K", [41]=";", [42]="\\", [43]=",",
+        [44]="/", [45]="N", [46]="M", [47]=".", [48]="Tab", [49]="Space", [50]="`", [51]="Delete",
+        [53]="Esc", [56]="Shift", [60]="Right Shift",
+        [65]="Keypad .", [67]="Keypad *", [69]="Keypad +", [71]="Clear", [75]="Keypad /",
+        [76]="Enter", [78]="Keypad -", [81]="Keypad =", [82]="Keypad 0", [83]="Keypad 1",
+        [84]="Keypad 2", [85]="Keypad 3", [86]="Keypad 4", [87]="Keypad 5", [88]="Keypad 6",
+        [89]="Keypad 7", [91]="Keypad 8", [92]="Keypad 9",
+        [96]="F5", [97]="F6", [98]="F7", [99]="F3", [100]="F8", [101]="F9", [103]="F11",
+        [105]="F13", [109]="F10", [111]="F12", [115]="Home", [116]="Page Up",
+        [117]="Forward Delete", [118]="F4", [119]="End", [120]="F2", [121]="Page Down",
+        [122]="F1", [123]="Left Arrow", [124]="Right Arrow", [125]="Down Arrow", [126]="Up Arrow",
+    };
+    if (code < 0) return @"—";
+    if (code < 128 && names[code]) return [NSString stringWithUTF8String:names[code]];
+    return [NSString stringWithFormat:@"Key %d", code];
+}
+/* A compact label for a keycap. */
+static NSString *short_key(int code) {
     switch (code) {
-        case 124: return GB_BUTTON_RIGHT; case 123: return GB_BUTTON_LEFT;
-        case 126: return GB_BUTTON_UP; case 125: return GB_BUTTON_DOWN;
-        case 13: return GB_BUTTON_UP; case 1: return GB_BUTTON_DOWN;   /* W, S */
-        case 0: return GB_BUTTON_LEFT; case 2: return GB_BUTTON_RIGHT; /* A, D */
-        case 7: case 40: return GB_BUTTON_A; /* X, K */
-        case 6: case 38: return GB_BUTTON_B; /* Z, J */
-        case 51: case 60: return GB_BUTTON_SELECT;
-        case 36: case 76: return GB_BUTTON_START;
-        default: return -1;
+        case 123: return @"←"; case 124: return @"→"; case 125: return @"↓"; case 126: return @"↑";
+        case 36: case 76: return @"↩"; case 51: return @"⌫"; case 48: return @"⇥";
+        case 49: return @"␣"; case 56: return @"⇧"; case 60: return @"R⇧";
+        default: return key_name(code).uppercaseString;
+    }
+}
+static int first_key(const GbBindings *bindings, int action) {
+    return bindings->key[action][0] >= 0 ? bindings->key[action][0] : bindings->key[action][1];
+}
+/* Keys that already mean something else, so they can't be bound: Esc, Space (pause),
+ * M (mute), F2 (restart) and the modifier keys. */
+static BOOL key_reserved(int code) {
+    switch (code) {
+        case 53: case 49: case 46: case 120:
+        case 54: case 55: case 57: case 58: case 59: case 61: case 62: case 63:
+            return YES;
+        default:
+            return code < 0 || code > 127;
     }
 }
 /* Four shades from the palette's ink down to a deep tone just above the well, so
@@ -118,7 +162,11 @@ static unsigned gb_shade_rgb(NSInteger palette, int shade) {
     NacreAudio audio;
     Gb *gb;
     SDL_AudioStream *gbStream;
-    uint8_t gbHeld[GB_BUTTON_COUNT];
+    uint8_t gbHeld[GB_BUTTON_COUNT]; /* what the console sees: keyboard or controller */
+    uint8_t kbHeld[GB_BUTTON_COUNT]; /* what the keyboard holds */
+    unsigned padHeld, padSeen;       /* controller actions now / at the last poll */
+    BOOL ffKey, ffOn;                /* fast-forward key held; fast-forward running */
+    GbBindings keys;
     CGContextRef gbContext;
 }
 @property(nonatomic, strong) NSWindow *window;
@@ -142,6 +190,10 @@ static unsigned gb_shade_rgb(NSInteger palette, int shade) {
 @property(nonatomic) BOOL audioAvailable;
 @property(nonatomic) NSInteger palette;
 @property(nonatomic) uint64_t previous;
+@property(nonatomic) NSInteger slot; /* save-state slot, 0..GB_STATE_SLOTS-1 */
+@property(nonatomic, strong) NSString *statusText;
+@property(nonatomic) uint64_t statusUntil;
+@property(nonatomic, strong) NSWindow *controlsSheet;
 @property(nonatomic, strong) NSButton *openButton;
 @property(nonatomic, strong) NSButton *pauseButton;
 @property(nonatomic, strong) NSButton *resetButton;
@@ -160,7 +212,19 @@ static unsigned gb_shade_rgb(NSInteger palette, int shade) {
 - (void)releaseKeys;
 - (void)updateControls;
 - (void)setGameBoyButton:(int)button pressed:(BOOL)pressed;
+- (void)gameBoyAction:(int)action pressed:(BOOL)pressed repeat:(BOOL)repeat;
+- (void)savePrefs;
+- (void)showControls:(id)sender;
+- (void)closeControls;
 - (void)drawGameBoyInWell:(NSRect)well;
+@end
+
+/* The rebinding sheet: every action with its two keys. */
+@interface NacreControlsView : NSView
+@property(nonatomic, weak) NacreController *controller;
+@property(nonatomic) int action, cellSlot;
+@property(nonatomic) BOOL capturing;
+@property(nonatomic, strong) NSString *note;
 @end
 
 static void timer_tick(Chip8 *chip8, void *userdata) {
@@ -184,9 +248,8 @@ static void timer_tick(Chip8 *chip8, void *userdata) {
         }
     }
     if (self.controller.isGB) {
-        int button = gb_button(event.keyCode);
-        if (button >= 0 && ![self.controller paused] && !event.isARepeat)
-            [self.controller setGameBoyButton:button pressed:YES];
+        int action = gbi_lookup(&self.controller->keys, event.keyCode);
+        if (action >= 0) [self.controller gameBoyAction:action pressed:YES repeat:event.isARepeat];
     } else {
         int key = chip_key(event.keyCode);
         if (key >= 0 && ![self.controller paused] && !event.isARepeat)
@@ -196,8 +259,8 @@ static void timer_tick(Chip8 *chip8, void *userdata) {
 }
 - (void)keyUp:(NSEvent *)event {
     if (self.controller.isGB) {
-        int button = gb_button(event.keyCode);
-        if (button >= 0) [self.controller setGameBoyButton:button pressed:NO];
+        int action = gbi_lookup(&self.controller->keys, event.keyCode);
+        if (action >= 0) [self.controller gameBoyAction:action pressed:NO repeat:NO];
     } else {
         int key = chip_key(event.keyCode);
         if (key >= 0) chip8_set_key(&self.controller->machine, (uint8_t)key, 0);
@@ -205,13 +268,16 @@ static void timer_tick(Chip8 *chip8, void *userdata) {
     self.needsDisplay = YES;
 }
 - (void)flagsChanged:(NSEvent *)event {
-    /* The right Shift is a modifier, so it arrives here rather than in keyDown.
-     * 0x4 is the device-dependent right-Shift bit. */
-    if (self.controller.isGB && event.keyCode == 60) {
-        BOOL down = (event.modifierFlags & 0x4) != 0;
-        if (!down || ![self.controller paused])
-            [self.controller setGameBoyButton:GB_BUTTON_SELECT pressed:down];
-        self.needsDisplay = YES;
+    /* Shift is a modifier, so it arrives here rather than in keyDown. The device-dependent
+     * bits say which one moved: 0x2 is the left Shift, 0x4 the right. */
+    unsigned short code = event.keyCode;
+    if (self.controller.isGB && (code == 56 || code == 60)) {
+        BOOL down = (event.modifierFlags & (code == 60 ? 0x4 : 0x2)) != 0;
+        int action = gbi_lookup(&self.controller->keys, code);
+        if (action >= 0) {
+            [self.controller gameBoyAction:action pressed:down repeat:NO];
+            self.needsDisplay = YES;
+        }
     }
     [super flagsChanged:event];
 }
@@ -275,19 +341,30 @@ static void timer_tick(Chip8 *chip8, void *userdata) {
     if (c.isGB) {
         /* A D-pad cross with A and B beside it, then Select and Start: the Game Boy's
          * own layout, labelled with the keyboard keys that press them. */
-        static const struct { int button; int col, row, cols; const char *label; CGFloat size; } caps[] = {
-            {GB_BUTTON_UP, 1, 0, 1, "↑", 15},    {GB_BUTTON_LEFT, 0, 1, 1, "←", 15},
-            {GB_BUTTON_RIGHT, 2, 1, 1, "→", 15}, {GB_BUTTON_DOWN, 1, 2, 1, "↓", 15},
-            {GB_BUTTON_A, 3, 0, 1, "A", 12},     {GB_BUTTON_B, 3, 1, 1, "B", 12},
-            {GB_BUTTON_SELECT, 0, 3, 2, "⌫ SELECT", 9}, {GB_BUTTON_START, 2, 3, 2, "↩ START", 9},
+        static const struct { int button; int col, row, cols; CGFloat size; } caps[] = {
+            {GB_BUTTON_UP, 1, 0, 1, 15},    {GB_BUTTON_LEFT, 0, 1, 1, 15},
+            {GB_BUTTON_RIGHT, 2, 1, 1, 15}, {GB_BUTTON_DOWN, 1, 2, 1, 15},
+            {GB_BUTTON_A, 3, 0, 1, 12},     {GB_BUTTON_B, 3, 1, 1, 12},
+            {GB_BUTTON_SELECT, 0, 3, 2, 9}, {GB_BUTTON_START, 2, 3, 2, 9},
         };
-        for (size_t i = 0; i < sizeof(caps) / sizeof(caps[0]); i++)
-            keycap(26 + caps[i].col * 44, 444 + caps[i].row * 39, caps[i].cols * 44 - 8,
-                   [NSString stringWithUTF8String:caps[i].label], c->gbHeld[caps[i].button] != 0,
-                   caps[i].size);
-        text(@"Arrows or WASD  ·  X/K is A  ·  Z/J is B", NSMakeRect(26, 610, 190, 18), 10,
+        for (size_t i = 0; i < sizeof(caps) / sizeof(caps[0]); i++) {
+            NSString *label = short_key(first_key(&c->keys, caps[i].button));
+            if (caps[i].button == GB_BUTTON_SELECT) label = [label stringByAppendingString:@" SELECT"];
+            if (caps[i].button == GB_BUTTON_START) label = [label stringByAppendingString:@" START"];
+            keycap(26 + caps[i].col * 44, 444 + caps[i].row * 39, caps[i].cols * 44 - 8, label,
+                   c->gbHeld[caps[i].button] != 0, caps[i].size);
+        }
+        int fast = first_key(&c->keys, GBI_FAST_FORWARD);
+        text(fast >= 0 ? [NSString stringWithFormat:@"Hold %@ to fast-forward", key_name(fast)]
+                       : @"Fast-forward is unbound",
+             NSMakeRect(26, 600, 190, 18), 10, NSFontWeightRegular, 0x7F847A, NO);
+        text([NSString stringWithFormat:@"%@ saves  ·  %@ loads  ·  slot %ld",
+                 short_key(first_key(&c->keys, GBI_SAVE_STATE)),
+                 short_key(first_key(&c->keys, GBI_LOAD_STATE)), (long)c.slot + 1],
+             NSMakeRect(26, 616, 190, 18), 10, NSFontWeightRegular, 0x7F847A, NO);
+        text(@"Space to pause  ·  M to mute", NSMakeRect(26, 632, 190, 18), 10,
              NSFontWeightRegular, 0x7F847A, NO);
-        text(@"Space to pause  ·  M to mute", NSMakeRect(26, 628, 190, 18), 10,
+        text(@"Session ▸ Controls… to rebind", NSMakeRect(26, 648, 190, 18), 10,
              NSFontWeightRegular, 0x7F847A, NO);
         text(@"GAME BOY  /  160 × 144", NSMakeRect(26, h - 36, 180, 18), 10,
              NSFontWeightMedium, 0x878C80, YES);
@@ -314,9 +391,10 @@ static void timer_tick(Chip8 *chip8, void *userdata) {
     }
     text(kind, NSMakeRect(255, 63, w - 400, 18), 10, NSFontWeightMedium, 0x7B8479, YES);
     BOOL paused = [c paused];
+    BOOL fast = c->ffOn && !paused;
     fill(NSMakeRect(w - 133, 42, 6, 6), c.fault ? 0xB66C52 : paused ? 0xB09361 : 0x608C70, 3);
-    text(c.fault ? @"STOPPED" : paused ? @"PAUSED" : @"RUNNING", NSMakeRect(w - 118, 37, 90, 20),
-         10, NSFontWeightMedium, 0x6C786C, YES);
+    text(c.fault ? @"STOPPED" : paused ? @"PAUSED" : fast ? @"FAST 4×" : @"RUNNING",
+         NSMakeRect(w - 118, 37, 90, 20), 10, NSFontWeightMedium, 0x6C786C, YES);
 
     NSRect well = NSMakeRect(254, 111, w - 286, h - 233);
     fill(NSOffsetRect(well, 0, 3), 0xD7D8CE, 14);
@@ -334,8 +412,9 @@ static void timer_tick(Chip8 *chip8, void *userdata) {
     }
     text(@"NACRE", NSMakeRect(well.origin.x + 18, NSMaxY(well) - 25, 100, 14), 8,
          NSFontWeightMedium, 0x64776B, YES);
-    if (paused || self.dropActive || c.fault) {
-        NSString *badge = self.dropActive ? @"Drop to open ROM" : c.fault ? @"Execution stopped" : @"Paused";
+    if (paused || self.dropActive || c.fault || fast) {
+        NSString *badge = self.dropActive ? @"Drop to open ROM" : c.fault ? @"Execution stopped"
+                        : paused ? @"Paused" : @"Fast-forward 4×";
         NSRect badgeRect = NSMakeRect(NSMidX(well) - 92, well.origin.y + 18, 184, 30);
         fill(badgeRect, 0x35483C, 15);
         NSMutableParagraphStyle *center = [NSMutableParagraphStyle new]; center.alignment = NSTextAlignmentCenter;
@@ -346,9 +425,139 @@ static void timer_tick(Chip8 *chip8, void *userdata) {
     NSString *note = c.fault;
     if (!note && (c.isGB ? c->gbStream == NULL : !c.audioAvailable)) note = @"Audio unavailable";
     if (!note && c.isGB) note = c.saveNote;
+    if (c.isGB && !c.fault && c.statusText && SDL_GetTicksNS() < c.statusUntil) note = c.statusText;
     if (note) text(note, NSMakeRect(254, h - 34, w - 450, 18), 10, NSFontWeightRegular, 0x7A8276, NO);
     text(c.isGB ? @"59.7 HZ FRAMES" : @"60 HZ TIMERS", NSMakeRect(w - 146, h - 34, 120, 18), 9,
          NSFontWeightMedium, 0x87907F, YES);
+}
+@end
+
+@implementation NacreControlsView {
+    NSButton *restoreButton, *doneButton;
+}
+static NSRect cell_rect(int row, int slot) {
+    return NSMakeRect(slot ? 360 : 200, 104 + row * 31, 140, 25);
+}
+- (BOOL)isFlipped { return YES; }
+- (BOOL)acceptsFirstResponder { return YES; }
+- (instancetype)initWithFrame:(NSRect)frame {
+    self = [super initWithFrame:frame];
+    if (!self) return nil;
+    restoreButton = [NSButton buttonWithTitle:@"Restore defaults" target:self action:@selector(restore:)];
+    restoreButton.frame = NSMakeRect(24, 558, 150, 30);
+    doneButton = [NSButton buttonWithTitle:@"Done" target:self action:@selector(done:)];
+    doneButton.frame = NSMakeRect(frame.size.width - 124, 558, 100, 30);
+    [self addSubview:restoreButton]; [self addSubview:doneButton];
+    return self;
+}
+- (void)restore:(id)sender {
+    (void)sender;
+    gbi_set_defaults(&self.controller->keys, DEFAULT_KEYS);
+    [self.controller savePrefs];
+    self.capturing = NO; self.note = @"Defaults restored.";
+    [self.window makeFirstResponder:self];
+    self.needsDisplay = YES; self.controller.view.needsDisplay = YES;
+}
+- (void)done:(id)sender { (void)sender; [self.controller closeControls]; }
+- (void)drawRect:(NSRect)dirty {
+    (void)dirty;
+    NacreController *c = self.controller;
+    fill(self.bounds, 0xF5F3EE, 0);
+    text(@"Game Boy controls", NSMakeRect(28, 22, 480, 24), 17, NSFontWeightSemibold, 0x293D34, NO);
+    text(@"Click a key, then press the new one. Esc cancels; Delete clears.",
+         NSMakeRect(28, 50, 490, 18), 11, NSFontWeightRegular, 0x747B72, NO);
+    text(@"KEY 1", NSMakeRect(200, 82, 140, 14), 9, NSFontWeightSemibold, 0x83867D, YES);
+    text(@"KEY 2", NSMakeRect(360, 82, 140, 14), 9, NSFontWeightSemibold, 0x83867D, YES);
+    for (int row = 0; row < GBI_COUNT; row++) {
+        CGFloat y = 104 + row * 31;
+        if (row == GBI_BUTTONS) fill(NSMakeRect(28, y - 4, 472, 1), 0xD8D8CF, 0);
+        text([NSString stringWithUTF8String:gbi_name((GbInput)row)], NSMakeRect(28, y + 4, 160, 18), 12,
+             NSFontWeightMedium, 0x4A544B, NO);
+        for (int slot = 0; slot < GBI_KEYS_PER_ACTION; slot++) {
+            NSRect rect = cell_rect(row, slot);
+            BOOL here = row == self.action && slot == self.cellSlot;
+            fill(rect, here ? (self.capturing ? 0xCFE0D4 : 0xE0EAE2) : 0xEFEDE6, 6);
+            if (here) {
+                NSBezierPath *outline = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(rect, 0.5, 0.5)
+                                                                        xRadius:6 yRadius:6];
+                [color(0x587668) setStroke]; outline.lineWidth = 1.5; [outline stroke];
+            }
+            NSString *label = here && self.capturing ? @"Press a key…" : key_name(c->keys.key[row][slot]);
+            text_aligned(label, NSInsetRect(rect, 6, 5), 12, NSFontWeightMedium,
+                         here && self.capturing ? 0x355A43 : 0x3A463E, NO, NSTextAlignmentCenter);
+        }
+    }
+    if (self.note) text(self.note, NSMakeRect(28, 478, 480, 16), 11, NSFontWeightMedium, 0xB66C52, NO);
+    text(@"Controller: D-pad or left stick, face buttons for A and B, Start and Back.",
+         NSMakeRect(28, 500, 490, 16), 10, NSFontWeightRegular, 0x7F847A, NO);
+    text(@"Right shoulder or either trigger: fast-forward (hold).",
+         NSMakeRect(28, 516, 490, 16), 10, NSFontWeightRegular, 0x7F847A, NO);
+    text(@"Left shoulder held + Start, Back or the top button: save, load, next slot.",
+         NSMakeRect(28, 532, 490, 16), 10, NSFontWeightRegular, 0x7F847A, NO);
+}
+- (void)mouseDown:(NSEvent *)event {
+    NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
+    for (int row = 0; row < GBI_COUNT; row++) {
+        for (int slot = 0; slot < GBI_KEYS_PER_ACTION; slot++) {
+            if (NSPointInRect(point, cell_rect(row, slot))) {
+                self.action = row; self.cellSlot = slot; self.capturing = YES; self.note = nil;
+                [self.window makeFirstResponder:self];
+                self.needsDisplay = YES;
+                return;
+            }
+        }
+    }
+    self.capturing = NO; self.needsDisplay = YES;
+}
+/* The key to bind arrived. */
+- (void)capture:(unsigned short)code {
+    NacreController *c = self.controller;
+    if (code == 53) {
+        self.capturing = NO; self.note = nil;
+    } else if (key_reserved(code)) {
+        self.note = @"That key is reserved.";
+    } else {
+        int previous = gbi_assign(&c->keys, (GbInput)self.action, self.cellSlot, code);
+        self.note = previous >= 0
+            ? [NSString stringWithFormat:@"Taken from %s.", gbi_name((GbInput)previous)] : nil;
+        self.capturing = NO;
+        [c savePrefs];
+        c.view.needsDisplay = YES;
+    }
+    self.needsDisplay = YES;
+}
+- (void)keyDown:(NSEvent *)event {
+    if (event.modifierFlags & (NSEventModifierFlagCommand | NSEventModifierFlagControl |
+                               NSEventModifierFlagOption)) return;
+    unsigned short code = event.keyCode;
+    if (self.capturing) {
+        if (!event.isARepeat) [self capture:code];
+        return;
+    }
+    NacreController *c = self.controller;
+    switch (code) {
+        case 126: self.action = (self.action + GBI_COUNT - 1) % GBI_COUNT; break;
+        case 125: self.action = (self.action + 1) % GBI_COUNT; break;
+        case 123: case 124: case 48: self.cellSlot = (self.cellSlot + 1) % GBI_KEYS_PER_ACTION; break;
+        case 36: case 76: self.capturing = YES; break;
+        case 51: case 117:
+            gbi_assign(&c->keys, (GbInput)self.action, self.cellSlot, GBI_UNBOUND);
+            [c savePrefs]; c.view.needsDisplay = YES;
+            break;
+        case 53: [c closeControls]; return;
+        default: return;
+    }
+    self.note = nil;
+    self.needsDisplay = YES;
+}
+- (void)flagsChanged:(NSEvent *)event {
+    unsigned short code = event.keyCode;
+    if (self.capturing && (code == 56 || code == 60) &&
+        (event.modifierFlags & (code == 60 ? 0x4 : 0x2))) {
+        [self capture:code];
+        return;
+    }
+    [super flagsChanged:event];
 }
 @end
 
@@ -379,6 +588,10 @@ static void timer_tick(Chip8 *chip8, void *userdata) {
     static const int16_t silence[480 * 2] = {0};
     if (!gb) return;
     if (!self.gbStreamRunning) { gb_audio_clear(gb); return; }
+    if (ffOn) { /* four times faster is a squeal, not music: run silent and let the queue drain */
+        while (gb_audio_read(gb, samples, 4096) > 0) {}
+        return;
+    }
     float ratio = GB_PERCENT[self.gbSpeed] / 100.0f;
     SDL_SetAudioStreamFrequencyRatio(gbStream, ratio);
     const int bytesPerMs = (int)(GB_AUDIO_SAMPLE_RATE / 1000u) * 4;
@@ -397,15 +610,181 @@ static void timer_tick(Chip8 *chip8, void *userdata) {
     while ((frames = gb_audio_read(gb, samples, 4096)) > 0)
         if (!drop) SDL_PutAudioStreamData(gbStream, samples, (int)(frames * 4));
 }
+/* The console sees a button held when the keyboard or a controller holds it. */
+- (void)applyButtons {
+    for (int button = 0; button < GB_BUTTON_COUNT; button++) {
+        uint8_t held = (kbHeld[button] || (padHeld & PAD_BIT(button))) ? 1 : 0;
+        gbHeld[button] = held;
+        if (gb) gb_set_button(gb, (GbButton)button, held);
+    }
+}
 - (void)setGameBoyButton:(int)button pressed:(BOOL)pressed {
     if (button < 0 || button >= GB_BUTTON_COUNT) return;
-    gbHeld[button] = pressed ? 1 : 0;
-    if (gb) gb_set_button(gb, (GbButton)button, pressed);
+    kbHeld[button] = pressed ? 1 : 0;
+    [self applyButtons];
 }
 - (void)releaseKeys {
     for (uint8_t key = 0; key < 16; key++) chip8_set_key(&machine, key, 0);
-    for (int button = 0; button < GB_BUTTON_COUNT; button++)
-        if (gbHeld[button]) [self setGameBoyButton:button pressed:NO];
+    memset(kbHeld, 0, sizeof(kbHeld));
+    ffKey = NO; padHeld = 0; padSeen = 0;
+    [self applyButtons];
+}
+/* A bound Game Boy key went down or up. */
+- (void)gameBoyAction:(int)action pressed:(BOOL)pressed repeat:(BOOL)repeat {
+    if (action < GBI_BUTTONS) {
+        if (!pressed) [self setGameBoyButton:action pressed:NO];
+        else if (![self paused] && !repeat) [self setGameBoyButton:action pressed:YES];
+    } else if (action == GBI_FAST_FORWARD) {
+        ffKey = pressed;
+    } else if (pressed && !repeat) {
+        if (action == GBI_SAVE_STATE) [self saveGameBoyState];
+        else if (action == GBI_LOAD_STATE) [self loadGameBoyState];
+        else if (action == GBI_NEXT_SLOT) [self chooseSlotNumber:(self.slot + 1) % GB_STATE_SLOTS];
+    }
+}
+/* Reads the controllers: held buttons feed the console, and the state hotkeys fire once
+ * per press. Only a focused, running window listens, so a game in the background isn't played. */
+- (void)pollPad {
+    unsigned held = pad_poll();
+    const char *note = pad_take_message();
+    if (note && self.isGB) [self setStatus:[NSString stringWithUTF8String:note]];
+    if (!self.isGB || [self paused]) held = 0;
+    unsigned fresh = held & ~padSeen;
+    padSeen = held; padHeld = held;
+    [self applyButtons];
+    if (fresh & PAD_BIT(GBI_SAVE_STATE)) [self saveGameBoyState];
+    if (fresh & PAD_BIT(GBI_LOAD_STATE)) [self loadGameBoyState];
+    if (fresh & PAD_BIT(GBI_NEXT_SLOT)) [self chooseSlotNumber:(self.slot + 1) % GB_STATE_SLOTS];
+}
+
+/* ---- Preferences and Game Boy save states ------------------------------------------------- */
+- (void)loadPrefs {
+    gbi_set_defaults(&keys, DEFAULT_KEYS);
+    self.slot = 0;
+    if (snapshotPath) return; /* the self-check always runs on the defaults */
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSString *saved = [defaults stringForKey:@"gbBindings"];
+    if (saved) gbi_parse(&keys, saved.UTF8String); /* junk leaves the defaults in place */
+    NSInteger slot = [defaults integerForKey:@"gbSlot"];
+    if (slot >= 0 && slot < GB_STATE_SLOTS) self.slot = slot;
+}
+- (void)savePrefs {
+    if (snapshotPath) return;
+    char text[512];
+    if (gbi_serialize(&keys, text, sizeof(text)) == 0) return;
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    [defaults setObject:[NSString stringWithUTF8String:text] forKey:@"gbBindings"];
+    [defaults setInteger:self.slot forKey:@"gbSlot"];
+}
+/* A short message in the footer that clears itself after a few seconds. */
+- (void)setStatus:(NSString *)message {
+    self.statusText = message;
+    self.statusUntil = SDL_GetTicksNS() + 3000000000ull;
+    self.view.needsDisplay = YES;
+}
+/* "Tetris.gb" keeps its states in "Tetris.state1" .. "Tetris.state4". The built-in demo
+ * and anything opened without a path have nowhere to put them. */
+- (NSString *)statePath:(NSInteger)slot {
+    if (!self.romURL || snapshotPath) return nil;
+    if ([self.romURL.path hasPrefix:NSBundle.mainBundle.resourcePath]) return nil;
+    NSString *extension = [NSString stringWithFormat:@"state%ld", (long)slot + 1];
+    return [self.romURL.path.stringByDeletingPathExtension stringByAppendingPathExtension:extension];
+}
+- (NSString *)slotTitle:(NSInteger)slot {
+    NSString *path = [self statePath:slot];
+    NSDate *when = path ? [[NSFileManager.defaultManager attributesOfItemAtPath:path error:NULL] fileModificationDate] : nil;
+    NSString *stamp = @"empty";
+    if (when) {
+        NSDateFormatter *formatter = [NSDateFormatter new];
+        formatter.dateStyle = NSDateFormatterShortStyle;
+        formatter.timeStyle = NSDateFormatterShortStyle;
+        stamp = [formatter stringFromDate:when];
+    }
+    return [NSString stringWithFormat:@"Slot %ld  ·  %@", (long)slot + 1, stamp];
+}
+- (void)saveGameBoyState {
+    if (!self.isGB || !gb || !self.romData) return;
+    NSString *path = [self statePath:self.slot];
+    if (!path) { [self setStatus:@"Save states need a ROM opened from a file"]; return; }
+    size_t capacity = gb_state_size(gb);
+    NSMutableData *blob = [NSMutableData dataWithLength:capacity];
+    size_t size = capacity ? gb_state_save(gb, blob.mutableBytes, capacity) : 0;
+    blob.length = size;
+    /* Atomic: written to a temporary file and renamed, so a crash never tears it. */
+    if (size > 0 && [blob writeToFile:path options:NSDataWritingAtomic error:NULL])
+        [self setStatus:[NSString stringWithFormat:@"Saved state to slot %ld", (long)self.slot + 1]];
+    else
+        [self setStatus:[NSString stringWithFormat:@"Couldn't save to slot %ld", (long)self.slot + 1]];
+}
+- (void)loadGameBoyState {
+    if (!self.isGB || !gb || !self.romData) return;
+    NSString *path = [self statePath:self.slot];
+    if (!path) { [self setStatus:@"Save states need a ROM opened from a file"]; return; }
+    NSString *slot = [NSString stringWithFormat:@"%ld", (long)self.slot + 1];
+    NSDictionary *attributes = [NSFileManager.defaultManager attributesOfItemAtPath:path error:NULL];
+    if (!attributes) { [self setStatus:[@"Slot " stringByAppendingFormat:@"%@ is empty", slot]]; return; }
+    NSData *blob = attributes.fileSize <= (1u << 24) ? [NSData dataWithContentsOfFile:path options:0 error:NULL] : nil;
+    if (blob && gb_state_load(gb, blob.bytes, blob.length)) {
+        /* The state remembers the buttons held when it was saved; what is held now wins. */
+        [self applyButtons];
+        gb_audio_clear(gb);
+        self.previous = SDL_GetTicksNS();
+        self.fault = nil;
+        [self setStatus:[@"Loaded state from slot " stringByAppendingString:slot]];
+        [self updateControls];
+    } else {
+        [self setStatus:[@"Slot " stringByAppendingFormat:@"%@ doesn't fit this game", slot]];
+    }
+}
+- (void)chooseSlotNumber:(NSInteger)slot {
+    if (slot < 0 || slot >= GB_STATE_SLOTS) return;
+    self.slot = slot;
+    [self savePrefs];
+    [self setStatus:[NSString stringWithFormat:@"State slot %ld", (long)slot + 1]];
+}
+- (void)saveStateAction:(id)sender {
+    (void)sender; [self saveGameBoyState]; [self.window makeFirstResponder:self.view];
+}
+- (void)loadStateAction:(id)sender {
+    (void)sender; [self loadGameBoyState]; [self.window makeFirstResponder:self.view];
+}
+- (void)chooseSlot:(NSMenuItem *)sender {
+    [self chooseSlotNumber:sender.tag]; [self.window makeFirstResponder:self.view];
+}
+- (BOOL)validateMenuItem:(NSMenuItem *)item {
+    if (item.action == @selector(saveStateAction:) || item.action == @selector(loadStateAction:))
+        return self.isGB && !self.dialogOpen && [self statePath:self.slot] != nil;
+    if (item.action == @selector(chooseSlot:)) {
+        item.state = item.tag == self.slot ? NSControlStateValueOn : NSControlStateValueOff;
+        item.title = [self slotTitle:item.tag];
+        return self.isGB && !self.dialogOpen;
+    }
+    if (item.action == @selector(showControls:)) return !self.dialogOpen && self.controlsSheet == nil;
+    return YES;
+}
+/* The rebinding sheet. The game is held (dialogOpen) while it is up. */
+- (void)showControls:(id)sender {
+    (void)sender;
+    if (self.dialogOpen || self.controlsSheet) return;
+    NSRect frame = NSMakeRect(0, 0, 540, 600);
+    NSWindow *sheet = [[NSWindow alloc] initWithContentRect:frame styleMask:NSWindowStyleMaskTitled
+                                                    backing:NSBackingStoreBuffered defer:NO];
+    sheet.appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
+    NacreControlsView *view = [[NacreControlsView alloc] initWithFrame:frame];
+    view.controller = self;
+    sheet.contentView = view;
+    self.controlsSheet = sheet;
+    self.dialogOpen = YES; [self releaseKeys]; [self syncAudio];
+    [self.window beginSheet:sheet completionHandler:^(NSModalResponse response) { (void)response; }];
+    [sheet makeFirstResponder:view];
+    [self updateControls];
+}
+- (void)closeControls {
+    NSWindow *sheet = self.controlsSheet;
+    if (!sheet) return;
+    self.controlsSheet = nil; self.dialogOpen = NO; self.previous = SDL_GetTicksNS();
+    [self.window endSheet:sheet]; [sheet orderOut:nil];
+    [self.window makeFirstResponder:self.view]; [self syncAudio]; [self updateControls];
 }
 - (void)drawGameBoyInWell:(NSRect)well {
     if (!gb) return;
@@ -665,9 +1044,13 @@ static void timer_tick(Chip8 *chip8, void *userdata) {
     (void)timer;
     uint64_t now = SDL_GetTicksNS(), elapsed = now - self.previous; self.previous = now;
     char error[256];
+    if (!self.isGB) ffOn = NO;
     if (self.isGB) {
+        [self pollPad];
+        ffOn = (ffKey || (padHeld & PAD_BIT(GBI_FAST_FORWARD))) && ![self paused];
+        unsigned percent = ffOn ? GB_FAST_PERCENT : GB_PERCENT[self.gbSpeed];
         if (![self paused] &&
-            !gb_advance_ns(gb, elapsed, GB_PERCENT[self.gbSpeed], error, sizeof(error))) {
+            !gb_advance_ns(gb, elapsed, percent, error, sizeof(error))) {
             self.fault = [NSString stringWithUTF8String:error];
             [self writeSave]; [self releaseKeys];
             [self alert:self.fault]; [self updateControls];
@@ -726,6 +1109,18 @@ static void timer_tick(Chip8 *chip8, void *userdata) {
     [self addMenu:session.submenu title:@"Pause / Resume" action:@selector(togglePause:) key:@"p"];
     [self addMenu:session.submenu title:@"Restart ROM" action:@selector(resetROM:) key:@"r"];
     [self addMenu:session.submenu title:@"Toggle Sound" action:@selector(toggleSound:) key:@""];
+    [session.submenu addItem:NSMenuItem.separatorItem];
+    [self addMenu:session.submenu title:@"Save State" action:@selector(saveStateAction:) key:@"s"];
+    [self addMenu:session.submenu title:@"Load State" action:@selector(loadStateAction:) key:@"l"];
+    NSMenuItem *slots = [session.submenu addItemWithTitle:@"State Slot" action:NULL keyEquivalent:@""];
+    slots.submenu = [[NSMenu alloc] initWithTitle:@"State Slot"];
+    for (NSInteger i = 0; i < GB_STATE_SLOTS; i++) {
+        NSMenuItem *item = [slots.submenu addItemWithTitle:[NSString stringWithFormat:@"Slot %ld", (long)i + 1]
+                                                    action:@selector(chooseSlot:) keyEquivalent:@""];
+        item.target = self; item.tag = i;
+    }
+    [session.submenu addItem:NSMenuItem.separatorItem];
+    [self addMenu:session.submenu title:@"Controls…" action:@selector(showControls:) key:@","];
     NSMenuItem *view = [bar addItemWithTitle:@"View" action:NULL keyEquivalent:@""];
     view.submenu = [[NSMenu alloc] initWithTitle:@"View"];
     [self addMenu:view.submenu title:@"Toggle Full Screen" action:@selector(fullscreen:) key:@"f"];
@@ -761,6 +1156,8 @@ static void timer_tick(Chip8 *chip8, void *userdata) {
     SDL_Init(SDL_INIT_AUDIO); chip8_init(&machine, 0x4E414352u);
     chip8_scheduler_init(&scheduler, CHIP8_DEFAULT_CPU_HZ);
     gb = gb_create();
+    [self loadPrefs];
+    if (!snapshotPath) pad_init();
     self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1120, 720)
         styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable
         backing:NSBackingStoreBuffered defer:NO];
@@ -872,6 +1269,27 @@ static void timer_tick(Chip8 *chip8, void *userdata) {
         return base + 2;
     return 0;
 }
+/* Fast-forward through the key path, then a save-state round trip in memory. Returns 0,
+ * or base..base+3 for the failing step. */
+- (int)checkGameBoyFeatures:(int)base {
+    NSEvent *down = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint
+        modifierFlags:0 timestamp:0 windowNumber:self.window.windowNumber context:nil
+        characters:@"\t" charactersIgnoringModifiers:@"\t" isARepeat:NO keyCode:48];
+    [self.view keyDown:down];
+    if (!ffKey) return base;
+    NSEvent *up = [NSEvent keyEventWithType:NSEventTypeKeyUp location:NSZeroPoint
+        modifierFlags:0 timestamp:0 windowNumber:self.window.windowNumber context:nil
+        characters:@"\t" charactersIgnoringModifiers:@"\t" isARepeat:NO keyCode:48];
+    [self.view keyUp:up];
+    if (ffKey) return base + 1;
+    size_t size = gb_state_size(gb);
+    NSMutableData *blob = [NSMutableData dataWithLength:size];
+    if (size < 2 || gb_state_save(gb, blob.mutableBytes, size) != size) return base + 2;
+    if (gb_state_load(gb, blob.bytes, size - 1)) return base + 3; /* a truncated state is refused */
+    if (!gb_state_load(gb, blob.bytes, size)) return base + 3;
+    [self applyButtons];
+    return 0;
+}
 - (BOOL)captureViewTo:(NSString *)path {
     [self.view layoutSubtreeIfNeeded];
     self.view.needsDisplay = YES;
@@ -901,6 +1319,7 @@ static void timer_tick(Chip8 *chip8, void *userdata) {
     if (self.isGB) {
         /* Launched with a cartridge: check its keys, run it a while, and capture it. */
         int stage = [self checkGameBoyKeys:12];
+        if (!stage) stage = [self checkGameBoyFeatures:16];
         if (stage) { [self finishSnapshot:stage]; return; }
         if (!gb_run_cycles(gb, (uint32_t)(GB_CLOCK_HZ * snapshotSeconds), error, sizeof(error))) {
             [self finishSnapshot:15]; return;
@@ -925,6 +1344,7 @@ static void timer_tick(Chip8 *chip8, void *userdata) {
     /* Let the stand-in finish drawing before counting frames. */
     if (!gb_run_cycles(gb, GB_CLOCK_HZ / 10, error, sizeof(error))) { [self finishSnapshot:7]; return; }
     int stage = [self checkGameBoyKeys:8];
+    if (!stage) stage = [self checkGameBoyFeatures:20];
     if (stage) { [self finishSnapshot:stage]; return; }
     /* A second capture beside the first shows the Game Boy screen and keycaps. */
     NSString *gbShot = [snapshotPath.stringByDeletingPathExtension stringByAppendingString:@"-gb.png"];
@@ -945,6 +1365,7 @@ static void timer_tick(Chip8 *chip8, void *userdata) {
     if (gbContext) CGContextRelease(gbContext);
     gbContext = NULL;
     gb_destroy(gb); gb = NULL;
+    pad_shutdown();
     SDL_Quit();
 }
 @end
