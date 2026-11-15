@@ -52,6 +52,8 @@ void gb_reset(Gb *gb) {
     gb->joyp_select = 0x30;
     gb->buttons = 0;
     gb->cycles = 0;
+    gb->pace_target = 0;
+    gb->pace_fraction = 0;
     gb_ppu_reset(gb);
     gb_apu_reset(gb);
     if (gb->cart.rom) gb_cart_reset(&gb->cart);
@@ -258,6 +260,19 @@ int gb_run_cycles(Gb *gb, uint32_t cycles, char *error, size_t error_capacity) {
         }
     }
     return 1;
+}
+
+int gb_advance_ns(Gb *gb, uint64_t elapsed_ns, unsigned speed_percent, char *error,
+                  size_t error_capacity) {
+    uint64_t scaled;
+    if (elapsed_ns > 250000000u) elapsed_ns = 250000000u; /* resume calmly after a stall */
+    if (speed_percent == 0) speed_percent = 100;
+    if (speed_percent > 1000) speed_percent = 1000;
+    scaled = elapsed_ns * GB_CLOCK_HZ / 100u * speed_percent + gb->pace_fraction;
+    gb->pace_target += scaled / 1000000000u;
+    gb->pace_fraction = scaled % 1000000000u;
+    if (gb->pace_target <= gb->cycles) return 1;
+    return gb_run_cycles(gb, (uint32_t)(gb->pace_target - gb->cycles), error, error_capacity);
 }
 
 const uint8_t *gb_framebuffer(const Gb *gb) { return gb->ppu.front; }

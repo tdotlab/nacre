@@ -42,6 +42,12 @@ void gb_reset(Gb *gb);
  * locked up (illegal opcode); the error text explains why. */
 int gb_run_cycles(Gb *gb, uint32_t cycles, char *error, size_t error_capacity);
 
+/* Runs the machine for `elapsed_ns` of wall time at `speed_percent` (100 = real
+ * speed). Elapsed time is capped at 250 ms and fractional cycles carry over, so
+ * calling this every display frame keeps long-run timing exact. */
+int gb_advance_ns(Gb *gb, uint64_t elapsed_ns, unsigned speed_percent, char *error,
+                  size_t error_capacity);
+
 /* 160x144 shade indices, 0 = lightest .. 3 = darkest. Updated once per frame. */
 const uint8_t *gb_framebuffer(const Gb *gb);
 uint32_t gb_frame_count(const Gb *gb);

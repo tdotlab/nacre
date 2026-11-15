@@ -17,7 +17,7 @@ audio devices.
 | `tests/test_gb.c`, `tools/get-gb-test-roms.py` | ROM-driven core checks; headless run/dump/press tool |
 | `src/macos/main.m` | ARC-managed AppKit app, native menus/panels, display, controls, SDL3 audio |
 | `src/macos/Info.plist.in` | Mac identity, version, document associations, OS requirement |
-| `src/windows/main.cpp` | Win32 + GDI+ app: window, owner-drawn controls, menus, dialogs, drop target, registry prefs, SDL3 audio |
+| `src/windows/main.cpp` | Win32 + GDI+ app: window, owner-drawn controls, menus, dialogs, drop target, registry prefs, SDL3 audio, Game Boy display/keys/`.sav` |
 | `src/windows/branding.h` | Shell mark and icon geometry (same shapes as the Mac header), shared by the app and the icon tool |
 | `src/windows/nacre.rc.in`, `nacre.manifest` | Embedded icon and welcome ROM, version info; comctl32 v6, PerMonitorV2 DPI |
 | `tools/windows-icon.cpp` | Build-time generator of `Nacre.ico` (PNG frames, 16–256 px) |
@@ -61,6 +61,17 @@ Audio goes into a ring buffer of 48 kHz stereo `int16`. If nobody drains it, the
 oldest samples are dropped. Saves are byte buffers: `gb_save_write`/`gb_save_load`
 plus a dirty flag, and the frontend owns the `.sav` file. `gb_set_wall_clock`
 feeds real time to the MBC3 clock, which then catches up when a save is loaded.
+
+`gb_advance_ns` turns wall time into cycles at a speed percentage and carries the
+fractional cycle, so a frontend calls it once per UI tick and stays exact over
+long runs. Each frontend picks the core from the ROM's header
+(`gb_rom_looks_valid`), not its extension. The Windows shell keeps both machines
+alive and switches between them. It writes `.sav` files a second after the cart
+goes dirty, and on restart, load and exit, through a temporary file and
+`MoveFileEx`. Game Boy audio is pushed into its own SDL3 stream: stereo, no
+callback, 48 kHz, resampled for 0.5×/2×. The queue is held between about 40 and
+150 ms, padding with silence when it runs short and dropping a batch when it
+runs long.
 
 ## Presentation
 

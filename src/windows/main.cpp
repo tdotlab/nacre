@@ -1,4 +1,4 @@
-/* Nacre for Windows: a native Win32 shell over the shared C CHIP-8 core.
+/* Nacre for Windows: a native Win32 shell over the shared C CHIP-8 and Game Boy cores.
  *
  * It mirrors the Mac interface: pearl sidebar, dark display well, palettes, live
  * keycaps, native menus and file dialogs, drag-and-drop, recent files, and saved
@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <map>
 #include <string>
 #include <vector>
@@ -25,6 +26,7 @@
 extern "C" {
 #include "audio.h"
 #include "chip8.h"
+#include "gb.h"
 #include "scheduler.h"
 }
 #include <SDL3/SDL.h>
@@ -62,6 +64,7 @@ const UINT WM_NACRE_SNAPSHOT = WM_APP + 2; /* run the self-check and capture */
 const UINT_PTR TIMER_TICK = 1;
 const UINT_PTR TIMER_SNAPSHOT = 2;
 const size_t MAX_ROM = CHIP8_MEMORY_SIZE - CHIP8_PROGRAM_START;
+const size_t MAX_GB_ROM = 8u << 20; /* the largest MBC5 cartridge */
 const int MAX_RECENT = 10;
 
 /* ---- Palette and metrics (matches the Mac view) ------------------------ */
@@ -75,6 +78,8 @@ const wchar_t *const PALETTE_NAME[3] = {L"Fern", L"Amber", L"Pearl"};
 const uint32_t SPEED_HZ[3] = {300, 600, 1000};
 const wchar_t *const SPEED_NAME[3] = {L"Relaxed · 300 Hz", L"Original · 600 Hz",
                                       L"Quick · 1000 Hz"};
+const unsigned GB_SPEED_PERCENT[3] = {50, 100, 200};
+const wchar_t *const GB_SPEED_NAME[3] = {L"Half · 0.5×", L"Normal · 1×", L"Double · 2×"};
 const float SIDEBAR_W = 222.0f;
 const int CLIENT_W = 1120, CLIENT_H = 730, MIN_W = 920, MIN_H = 730;
 
@@ -96,6 +101,19 @@ struct App {
     Chip8 machine;
     Chip8Scheduler scheduler;
     Audio audio;
+
+    /* Game Boy session; `is_gb` says which machine is current. */
+    Gb *gb;
+    bool is_gb;
+    int gb_speed;              /* index into GB_SPEED_PERCENT */
+    bool gb_keys[GB_BUTTON_COUNT], shown_gb_keys[GB_BUTTON_COUNT];
+    uint32_t gb_frame_seen;
+    std::wstring save_path;    /* empty when the cartridge has no battery */
+    std::wstring save_note;
+    uint64_t save_due;         /* when a dirty save should be written (ns) */
+    SDL_AudioStream *gb_stream;
+    bool gb_stream_running;
+    Bitmap *gb_bitmap;
 
     std::vector<uint8_t> rom;
     std::wstring rom_path;
@@ -120,6 +138,7 @@ struct App {
     WINDOWPLACEMENT windowed_placement;
 
     std::wstring snapshot_path;
+    double snapshot_seconds; /* how long a launched cartridge runs before capture */
     int snapshot_status;
     std::wstring icon_font, text_font, semibold_font, mono_font;
     std::map<int, Font *> fonts;
@@ -238,8 +257,52 @@ bool paused() {
 }
 
 void sync_audio() {
-    SDL_SetAtomicInt(&g.audio.active,
-                     g.audio_available && !g.muted && !paused() && g.machine.sound_timer > 0);
+    SDL_SetAtomicInt(&g.audio.active, !g.is_gb && g.audio_available && !g.muted && !paused() &&
+                                          g.machine.sound_timer > 0);
+    bool gb_run = g.is_gb && g.gb_stream && !g.muted && !paused();
+    if (gb_run != g.gb_stream_running && g.gb_stream) {
+        if (gb_run) {
+            SDL_ClearAudioStream(g.gb_stream);
+            gb_audio_clear(g.gb);
+            SDL_ResumeAudioStreamDevice(g.gb_stream);
+        } else {
+            SDL_PauseAudioStreamDevice(g.gb_stream);
+            SDL_ClearAudioStream(g.gb_stream);
+        }
+        g.gb_stream_running = gb_run;
+    }
+}
+
+/* Moves the samples the Game Boy produced this tick to the device. The emulator
+ * runs on the wall clock and the device on its own crystal, so the queue is kept
+ * between about 40 and 150 ms: top it up with silence after an underrun and drop
+ * a batch when it runs long. Fast and slow speeds resample to keep up. */
+void pump_gb_audio() {
+    static int16_t samples[4096 * 2];
+    if (!g.gb) return;
+    if (!g.gb_stream_running) {
+        gb_audio_clear(g.gb);
+        return;
+    }
+    float ratio = GB_SPEED_PERCENT[g.gb_speed] / 100.0f;
+    SDL_SetAudioStreamFrequencyRatio(g.gb_stream, ratio);
+    const int bytes_per_ms = (int)(GB_AUDIO_SAMPLE_RATE / 1000u) * 4;
+    int queued = SDL_GetAudioStreamQueued(g.gb_stream);
+    bool drop = queued > (int)(150 * bytes_per_ms * ratio);
+    if (queued < (int)(20 * bytes_per_ms * ratio)) {
+        static const int16_t silence[480 * 2] = {0};
+        int pad = (int)(40 * bytes_per_ms * ratio) - queued;
+        while (pad > 0) {
+            int chunk = pad < (int)sizeof(silence) ? pad & ~3 : (int)sizeof(silence);
+            if (chunk <= 0) break;
+            SDL_PutAudioStreamData(g.gb_stream, silence, chunk);
+            pad -= chunk;
+        }
+    }
+    size_t frames;
+    while ((frames = gb_audio_read(g.gb, samples, 4096)) > 0) {
+        if (!drop) SDL_PutAudioStreamData(g.gb_stream, samples, (int)(frames * 4));
+    }
 }
 
 void timer_tick(Chip8 *chip8, void *userdata) {
@@ -250,6 +313,10 @@ void timer_tick(Chip8 *chip8, void *userdata) {
 
 void release_keys() {
     for (uint8_t key = 0; key < 16; key++) chip8_set_key(&g.machine, key, 0);
+    for (int b = 0; b < GB_BUTTON_COUNT; b++) {
+        g.gb_keys[b] = false;
+        if (g.gb) gb_set_button(g.gb, (GbButton)b, 0);
+    }
 }
 
 /* ---- Geometry ---------------------------------------------------------- */
@@ -281,6 +348,9 @@ void invalidate_well() {
 }
 void invalidate_keys() { invalidate({20.0f, 438.0f, 190.0f, 165.0f}); }
 void invalidate_header() { invalidate({240.0f, 0.0f, std::max(logical_w() - 240.0f, 0.0f), 100.0f}); }
+void invalidate_footer() {
+    invalidate({240.0f, logical_h() - 44.0f, std::max(logical_w() - 240.0f, 0.0f), 44.0f});
+}
 
 /* ---- Text -------------------------------------------------------------- */
 
@@ -321,7 +391,57 @@ void draw_text(Graphics &gfx, const wchar_t *text, float x, float y, float w, fl
 const char *KEY_LABELS = "1234QWERASDFZXCV";
 const int KEY_VALUES[16] = {1, 2, 3, 12, 4, 5, 6, 13, 7, 8, 9, 14, 10, 0, 11, 15};
 
+/* Game Boy shades run from the palette's ink (shade 0, the lightest) down to a
+ * deep tone just above the well, so a Game Boy screen reads as the same phosphor
+ * as CHIP-8 pixels rather than a green LCD pasted into the window. */
+unsigned gb_shade_rgb(int palette, int shade) {
+    const unsigned dark = 0x1E2A25;
+    unsigned ink = PALETTE_INK[palette], out = 0;
+    for (int channel = 0; channel < 3; channel++) {
+        int shift = channel * 8;
+        int a = (int)((ink >> shift) & 0xFF), b = (int)((dark >> shift) & 0xFF);
+        out |= (unsigned)(a + (b - a) * shade / 3) << shift;
+    }
+    return out;
+}
+
+void draw_gb_display(Graphics &gfx, const LRect &well) {
+    float s = g.scale;
+    float scale = std::floor(std::min((well.w * s - 48.0f * s) / GB_SCREEN_WIDTH,
+                                      (well.h * s - 64.0f * s) / GB_SCREEN_HEIGHT));
+    if (scale < 1.0f) scale = 1.0f;
+    int w = (int)scale * GB_SCREEN_WIDTH, h = (int)scale * GB_SCREEN_HEIGHT;
+    int ox = (int)std::floor((well.x + well.w / 2.0f) * s - w / 2.0f);
+    int oy = (int)std::floor((well.y + well.h / 2.0f) * s - h / 2.0f);
+    if (!g.gb_bitmap) g.gb_bitmap = new Bitmap(GB_SCREEN_WIDTH, GB_SCREEN_HEIGHT, PixelFormat32bppRGB);
+    Bitmap *frame = g.gb_bitmap;
+    const uint8_t *pixels = gb_framebuffer(g.gb);
+    uint32_t colors[4];
+    for (int i = 0; i < 4; i++) colors[i] = 0xFF000000u | gb_shade_rgb(g.palette, i);
+    BitmapData data;
+    Rect all(0, 0, GB_SCREEN_WIDTH, GB_SCREEN_HEIGHT);
+    if (frame->LockBits(&all, ImageLockModeWrite, PixelFormat32bppRGB, &data) == Ok) {
+        for (int y = 0; y < GB_SCREEN_HEIGHT; y++) {
+            uint32_t *row = reinterpret_cast<uint32_t *>(static_cast<uint8_t *>(data.Scan0) + y * data.Stride);
+            for (int x = 0; x < GB_SCREEN_WIDTH; x++) row[x] = colors[pixels[y * GB_SCREEN_WIDTH + x] & 3];
+        }
+        frame->UnlockBits(&data);
+    }
+    GraphicsState state = gfx.Save();
+    gfx.ResetTransform();
+    gfx.SetInterpolationMode(InterpolationModeNearestNeighbor);
+    gfx.SetPixelOffsetMode(PixelOffsetModeHalf);
+    gfx.SetSmoothingMode(SmoothingModeNone);
+    gfx.DrawImage(frame, Rect(ox, oy, w, h), 0, 0, GB_SCREEN_WIDTH, GB_SCREEN_HEIGHT, UnitPixel);
+    gfx.Restore(state);
+    g.gb_frame_seen = gb_frame_count(g.gb);
+}
+
 void draw_display(Graphics &gfx, const LRect &well) {
+    if (g.is_gb) {
+        draw_gb_display(gfx, well);
+        return;
+    }
     /* Centered integer scaling in device pixels, so every CHIP-8 pixel is crisp. */
     float s = g.scale;
     float scale = std::floor(std::min((well.w * s - 48.0f * s) / CHIP8_DISPLAY_WIDTH,
@@ -373,24 +493,48 @@ void render(Graphics &gfx, const RECT &clip) {
     draw_text(gfx, L"Execution speed", 26, 249, 174, 20, 12, UI, 0x4A544B);
     draw_text(gfx, L"Display", 26, 325, 174, 20, 12, UI, 0x4A544B);
     draw_text(gfx, L"KEYBOARD", 26, 414, 174, 18, 10, MONO_BOLD, 0x83867D);
-    for (int i = 0; i < 16; i++) {
-        float x = 26.0f + (i % 4) * 44, y = 444.0f + (i / 4) * 39;
-        bool held = g.machine.keys[KEY_VALUES[i]] != 0;
-        nacre::fill_round(gfx, x, y + 2, 36, 31, 6, held ? 0x416452 : 0xD9DAD1);
-        nacre::fill_round(gfx, x, y, 36, 30, 6, held ? 0x527A64 : 0xF6F5F0);
-        wchar_t label[2] = {(wchar_t)KEY_LABELS[i], 0};
-        draw_text(gfx, label, x, y + 6, 36, 20, 12, MONO, held ? 0xFFFFFF : 0x596259,
+    auto keycap = [&](float x, float y, float cw, const wchar_t *label, bool held, float size) {
+        nacre::fill_round(gfx, x, y + 2, cw, 31, 6, held ? 0x416452 : 0xD9DAD1);
+        nacre::fill_round(gfx, x, y, cw, 30, 6, held ? 0x527A64 : 0xF6F5F0);
+        draw_text(gfx, label, x, y + (size < 12 ? 8 : 6), cw, 20, size, MONO, held ? 0xFFFFFF : 0x596259,
                   StringAlignmentCenter);
+    };
+    if (g.is_gb) {
+        /* A D-pad cross with A and B beside it, then Select and Start: the Game Boy's
+         * own layout, labelled with the keyboard keys that press them. */
+        struct Cap { int button; float col, row, cols; const wchar_t *label; float size; };
+        static const Cap caps[] = {
+            {GB_BUTTON_UP, 1, 0, 1, L"↑", 15},    {GB_BUTTON_LEFT, 0, 1, 1, L"←", 15},
+            {GB_BUTTON_RIGHT, 2, 1, 1, L"→", 15}, {GB_BUTTON_DOWN, 1, 2, 1, L"↓", 15},
+            {GB_BUTTON_A, 3, 0, 1, L"A", 12},     {GB_BUTTON_B, 3, 1, 1, L"B", 12},
+            {GB_BUTTON_SELECT, 0, 3, 2, L"⌫ SELECT", 9}, {GB_BUTTON_START, 2, 3, 2, L"↵ START", 9},
+        };
+        for (const Cap &cap : caps)
+            keycap(26.0f + cap.col * 44, 444.0f + cap.row * 39, cap.cols * 44 - 8, cap.label,
+                   g.gb_keys[cap.button], cap.size);
+        draw_text(gfx, L"Arrows  ·  X is A  ·  Z is B", 26, 610, 190, 18, 10, UI, 0x7F847A);
+        draw_text(gfx, L"Space to pause  ·  M to mute", 26, 628, 190, 18, 10, UI, 0x7F847A);
+        draw_text(gfx, L"GAME BOY  /  160 × 144", 26, h - 36, 180, 18, 10, MONO, 0x878C80);
+    } else {
+        for (int i = 0; i < 16; i++) {
+            wchar_t label[2] = {(wchar_t)KEY_LABELS[i], 0};
+            keycap(26.0f + (i % 4) * 44, 444.0f + (i / 4) * 39, 36, label,
+                   g.machine.keys[KEY_VALUES[i]] != 0, 12);
+        }
+        draw_text(gfx, L"Space to pause  ·  M to mute", 26, 610, 190, 18, 10, UI, 0x7F847A);
+        draw_text(gfx, L"CHIP-8  /  64 × 32", 26, h - 36, 180, 18, 10, MONO, 0x878C80);
     }
-    draw_text(gfx, L"Space to pause  ·  M to mute", 26, 610, 190, 18, 10, UI, 0x7F847A);
-    draw_text(gfx, L"CHIP-8  /  64 × 32", 26, h - 36, 180, 18, 10, MONO, 0x878C80);
 
     std::wstring title = g.rom_bundled ? L"Welcome to Nacre"
                          : g.rom_path.empty() ? L"Your next little world"
                                               : file_stem(g.rom_path);
     draw_text(gfx, title.c_str(), 254, 23, std::max(w - 430.0f, 0.0f), 36, 23, SEMIBOLD, C_INK);
-    draw_text(gfx, g.rom_bundled ? L"PRESS A KEYPAD KEY TO SAY HELLO" : L"CHIP-8 ROM", 255, 63,
-              std::max(w - 400.0f, 0.0f), 18, 10, MONO, 0x7B8479);
+    std::wstring kind = g.rom_bundled ? L"PRESS A KEYPAD KEY TO SAY HELLO" : L"CHIP-8 ROM";
+    if (g.is_gb) {
+        std::wstring cart = widen(gb_title(g.gb));
+        kind = cart.empty() ? L"GAME BOY ROM" : L"GAME BOY  ·  " + cart;
+    }
+    draw_text(gfx, kind.c_str(), 255, 63, std::max(w - 400.0f, 0.0f), 18, 10, MONO, 0x7B8479);
     bool is_paused = paused();
     nacre::fill_round(gfx, w - 133, 42, 6, 6, 3,
                       !g.fault.empty() ? 0xB66C52 : is_paused ? 0xB09361 : 0x608C70);
@@ -410,11 +554,15 @@ void render(Graphics &gfx, const RECT &clip) {
         nacre::fill_round(gfx, bx, by, 184, 30, 15, 0x35483C);
         draw_text(gfx, badge, bx, by + 6, 184, 20, 12, UI, 0xDCE8DA, StringAlignmentCenter);
     }
-    if (!g.fault.empty() || !g.audio_available) {
-        std::wstring note = !g.fault.empty() ? widen(g.fault.c_str()) : L"Audio unavailable";
+    std::wstring note = !g.fault.empty()     ? widen(g.fault.c_str())
+                        : !g.audio_available || (g.is_gb && !g.gb_stream)
+                            ? std::wstring(L"Audio unavailable")
+                        : g.is_gb            ? g.save_note
+                                             : std::wstring();
+    if (!note.empty())
         draw_text(gfx, note.c_str(), 254, h - 34, std::max(w - 450.0f, 0.0f), 18, 10, UI, 0x7A8276);
-    }
-    draw_text(gfx, L"60 HZ TIMERS", w - 146, h - 34, 120, 18, 9, MONO, 0x87907F, StringAlignmentFar);
+    draw_text(gfx, g.is_gb ? L"59.7 HZ FRAMES" : L"60 HZ TIMERS", w - 146, h - 34, 120, 18, 9, MONO,
+              0x87907F, StringAlignmentFar);
 }
 
 void ensure_back_buffer(int w, int h) {
@@ -588,6 +736,16 @@ void layout() {
     place(g.sound, w - 164, h - 88, 132, 34);
 }
 
+/* Each machine keeps its own speed choice; the speed control shows the current one. */
+int speed_index() {
+    if (g.is_gb) return g.gb_speed;
+    for (int i = 0; i < 3; i++)
+        if (SPEED_HZ[i] == g.cpu_hz) return i;
+    return 1;
+}
+
+const wchar_t *const *speed_names() { return g.is_gb ? GB_SPEED_NAME : SPEED_NAME; }
+
 void update_controls() {
     bool ready = !g.rom.empty();
     SetWindowTextW(g.open, L"Open ROM…");
@@ -599,8 +757,8 @@ void update_controls() {
     EnableWindow(g.restart, ready);
     SetWindowTextW(g.sound, g.muted ? L"Sound off" : L"Sound on");
     EnableWindow(g.sound, g.audio_available);
-    for (int i = 0; i < 3; i++)
-        if (SPEED_HZ[i] == g.cpu_hz) SetWindowTextW(g.speed, SPEED_NAME[i]);
+    SetWindowTextW(g.speed, speed_names()[speed_index()]);
+    InvalidateRect(g.speed, NULL, FALSE);
     SetWindowTextW(g.palette_button, PALETTE_NAME[g.palette]);
     InvalidateRect(g.pause, NULL, FALSE);
     InvalidateRect(g.sound, NULL, FALSE);
@@ -628,11 +786,14 @@ bool pick_rom_path(std::wstring &out) {
     if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER,
                                 IID_PPV_ARGS(&dialog))))
         return false;
-    COMDLG_FILTERSPEC filters[] = {{L"CHIP-8 ROMs (*.ch8, *.rom, *.bin)", L"*.ch8;*.rom;*.bin"},
-                                   {L"All files", L"*.*"}};
-    dialog->SetFileTypes(2, filters);
+    COMDLG_FILTERSPEC filters[] = {
+        {L"Game ROMs (*.ch8, *.gb, *.gbc, *.rom, *.bin)", L"*.ch8;*.gb;*.gbc;*.rom;*.bin"},
+        {L"CHIP-8 ROMs (*.ch8, *.rom, *.bin)", L"*.ch8;*.rom;*.bin"},
+        {L"Game Boy ROMs (*.gb, *.gbc)", L"*.gb;*.gbc"},
+        {L"All files", L"*.*"}};
+    dialog->SetFileTypes(4, filters);
     dialog->SetFileTypeIndex(1);
-    dialog->SetTitle(L"Open a CHIP-8 ROM");
+    dialog->SetTitle(L"Open a ROM");
     dialog->SetOkButtonLabel(L"Open ROM");
     DWORD options = 0;
     dialog->GetOptions(&options);
@@ -656,36 +817,113 @@ bool pick_rom_path(std::wstring &out) {
 
 /* ---- ROM loading ------------------------------------------------------- */
 
-bool read_file(const std::wstring &path, std::vector<uint8_t> &bytes, std::string &error) {
+/* Reads a whole file of 1..limit bytes. Returns 0 on success, -1 if it is empty or
+ * too large, or the Windows error code. */
+DWORD read_bytes(const std::wstring &path, size_t limit, std::vector<uint8_t> &bytes) {
     HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
                               FILE_ATTRIBUTE_NORMAL, NULL);
-    if (file == INVALID_HANDLE_VALUE) {
-        DWORD code = GetLastError();
-        char message[256];
-        snprintf(message, sizeof(message),
-                 "Nacre couldn't open that file (Windows error %lu). Your current session has "
-                 "been kept.",
-                 (unsigned long)code);
-        error = message;
-        return false;
-    }
+    if (file == INVALID_HANDLE_VALUE) return GetLastError() ? GetLastError() : (DWORD)-2;
     LARGE_INTEGER size = {};
-    bool ok = GetFileSizeEx(file, &size) != 0;
-    if (!ok || size.QuadPart <= 0 || (unsigned long long)size.QuadPart > MAX_ROM) {
+    if (!GetFileSizeEx(file, &size) || size.QuadPart <= 0 || (unsigned long long)size.QuadPart > limit) {
         CloseHandle(file);
-        error = "Choose a non-empty CHIP-8 ROM no larger than 3,584 bytes. Your current session "
-                "has been kept.";
-        return false;
+        return (DWORD)-1;
     }
     bytes.resize((size_t)size.QuadPart);
     DWORD read = 0;
-    ok = ReadFile(file, bytes.data(), (DWORD)bytes.size(), &read, NULL) != 0 && read == bytes.size();
+    bool ok = ReadFile(file, bytes.data(), (DWORD)bytes.size(), &read, NULL) != 0 && read == bytes.size();
+    DWORD code = ok ? 0 : (GetLastError() ? GetLastError() : (DWORD)-2);
     CloseHandle(file);
-    if (!ok) error = "Nacre couldn't read that file. Your current session has been kept.";
-    return ok;
+    return code;
+}
+
+bool read_file(const std::wstring &path, std::vector<uint8_t> &bytes, std::string &error) {
+    DWORD code = read_bytes(path, MAX_GB_ROM, bytes);
+    if (code == 0) return true;
+    char message[256];
+    if (code == (DWORD)-1)
+        snprintf(message, sizeof(message),
+                 "Choose a non-empty CHIP-8 or Game Boy ROM no larger than 8 MB. Your current "
+                 "session has been kept.");
+    else
+        snprintf(message, sizeof(message),
+                 "Nacre couldn't read that file (Windows error %lu). Your current session has "
+                 "been kept.",
+                 (unsigned long)code);
+    error = message;
+    return false;
+}
+
+/* ---- Game Boy battery saves -------------------------------------------- */
+
+/* "Tetris.gb" saves to "Tetris.sav" in the same folder, as most emulators do. */
+std::wstring save_path_for(const std::wstring &rom_path) {
+    size_t slash = rom_path.find_last_of(L"\\/");
+    size_t dot = rom_path.find_last_of(L'.');
+    if (dot == std::wstring::npos || (slash != std::wstring::npos && dot < slash))
+        return rom_path + L".sav";
+    return rom_path.substr(0, dot) + L".sav";
+}
+
+/* Writes the cartridge RAM when it has changed: to a temporary file first, then
+ * swapped into place, so a crash mid-write never leaves a torn save. */
+void write_save() {
+    g.save_due = 0;
+    if (!g.gb || !g.is_gb || g.save_path.empty() || g.ephemeral || !gb_save_dirty(g.gb)) return;
+    gb_set_wall_clock(g.gb, (int64_t)time(NULL));
+    std::vector<uint8_t> data(gb_save_size(g.gb));
+    size_t size = data.empty() ? 0 : gb_save_write(g.gb, data.data(), data.size());
+    std::wstring temp = g.save_path + L".tmp";
+    HANDLE file = CreateFileW(temp.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL, NULL);
+    bool ok = file != INVALID_HANDLE_VALUE && size > 0;
+    if (file != INVALID_HANDLE_VALUE) {
+        DWORD written = 0;
+        ok = ok && WriteFile(file, data.data(), (DWORD)size, &written, NULL) && written == size;
+        ok = FlushFileBuffers(file) && ok;
+        CloseHandle(file);
+    }
+    if (ok)
+        ok = MoveFileExW(temp.c_str(), g.save_path.c_str(),
+                         MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+    if (ok) {
+        gb_save_mark_clean(g.gb);
+        g.save_note = L"Saved to " + file_name(g.save_path);
+    } else {
+        DeleteFileW(temp.c_str());
+        g.save_note = L"Couldn't write " + file_name(g.save_path);
+    }
+    invalidate_footer();
+}
+
+void read_save() {
+    g.save_note.clear();
+    if (g.save_path.empty()) return;
+    gb_set_wall_clock(g.gb, (int64_t)time(NULL));
+    std::vector<uint8_t> data;
+    DWORD code = read_bytes(g.save_path, 1u << 20, data);
+    if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND) {
+        g.save_note = L"Saves to " + file_name(g.save_path);
+    } else if (code == 0 && gb_save_load(g.gb, data.data(), data.size())) {
+        g.save_note = L"Loaded " + file_name(g.save_path);
+    } else {
+        /* Leave a save we can't use alone rather than overwrite it. */
+        g.save_note = L"Ignored " + file_name(g.save_path) + L"; it doesn't fit this cartridge";
+        g.save_path.clear();
+    }
 }
 
 void start_machine() {
+    if (g.is_gb) {
+        write_save();
+        gb_reset(g.gb);
+        gb_audio_clear(g.gb);
+        release_keys();
+        g.fault.clear();
+        g.user_paused = false;
+        g.previous = SDL_GetTicksNS();
+        memset(g.shown_gb_keys, 0, sizeof(g.shown_gb_keys));
+        return;
+    }
     char error[256];
     Chip8 candidate;
     chip8_init(&candidate, 0x4E414352u);
@@ -698,19 +936,56 @@ void start_machine() {
     memset(g.shown_keys, 0, sizeof(g.shown_keys));
 }
 
+/* A file with a Game Boy cartridge header runs on the Game Boy core; anything
+ * else must be a CHIP-8 program. A failed load keeps the current session. */
 void load_candidate(const std::vector<uint8_t> &bytes, const std::wstring &path, bool bundled) {
     char error[256];
-    Chip8 candidate;
-    chip8_init(&candidate, 0x4E414352u);
-    if (!chip8_load_bytes(&candidate, bytes.data(), bytes.size(), error, sizeof(error))) {
-        show_alert(widen(error));
-        return;
+    bool gb_rom = !bundled && gb_rom_looks_valid(bytes.data(), bytes.size());
+    if (gb_rom) {
+        if (!g.gb) {
+            show_alert(L"The Game Boy core couldn't start, so this ROM can't run.");
+            return;
+        }
+        write_save(); /* the cartridge being replaced */
+        if (!gb_load_rom(g.gb, bytes.data(), bytes.size(), error, sizeof(error))) {
+            show_alert(widen(error) + L" Your current session has been kept.");
+            return;
+        }
+    } else {
+        if (bytes.size() > MAX_ROM) {
+            show_alert(L"That file has no Game Boy cartridge header, and a CHIP-8 ROM can be at "
+                       L"most 3,584 bytes. Your current session has been kept.");
+            return;
+        }
+        Chip8 candidate;
+        chip8_init(&candidate, 0x4E414352u);
+        if (!chip8_load_bytes(&candidate, bytes.data(), bytes.size(), error, sizeof(error))) {
+            show_alert(widen(error));
+            return;
+        }
+        write_save();
     }
+    g.is_gb = gb_rom;
     g.rom = bytes;
     g.rom_path = path;
     g.rom_bundled = bundled;
-    start_machine();
-    if (!bundled) note_recent(path);
+    g.save_path.clear();
+    g.save_note.clear();
+    if (gb_rom) {
+        if (gb_has_battery(g.gb) && !path.empty()) {
+            g.save_path = save_path_for(path);
+            read_save();
+        }
+        g.gb_frame_seen = gb_frame_count(g.gb) - 1;
+        g.fault.clear();
+        g.user_paused = false;
+        g.previous = SDL_GetTicksNS();
+        release_keys();
+        memset(g.shown_gb_keys, 0, sizeof(g.shown_gb_keys));
+    } else {
+        start_machine();
+    }
+    if (!bundled && !path.empty()) note_recent(path);
     SetFocus(g.hwnd);
     sync_audio();
     update_controls();
@@ -790,6 +1065,13 @@ void set_palette(int index) {
 
 void set_speed(int index) {
     if (index < 0 || index > 2) return;
+    if (g.is_gb) {
+        g.gb_speed = index;
+        reg_set_dword(L"gbSpeed", (DWORD)index);
+        update_controls();
+        SetFocus(g.hwnd);
+        return;
+    }
     g.cpu_hz = SPEED_HZ[index];
     chip8_scheduler_set_cpu_hz(&g.scheduler, g.cpu_hz);
     reg_set_dword(L"cpuHz", g.cpu_hz);
@@ -828,7 +1110,7 @@ void show_about() {
     release_keys();
     sync_audio();
     TaskDialog(g.hwnd, NULL, L"About Nacre", L"Nacre " NACRE_VERSION_W,
-               L"A small CHIP-8 machine.\nMade by tdotlab.\n\nSound uses SDL3, bundled under its "
+               L"A small CHIP-8 and Game Boy machine.\nMade by tdotlab.\n\nSound uses SDL3, bundled under its "
                L"zlib license (see THIRD_PARTY_NOTICES.txt).",
                TDCBF_OK_BUTTON, TD_INFORMATION_ICON, NULL);
     g.dialog_open = was_open;
@@ -867,13 +1149,7 @@ void on_command(int id) {
     case IDCANCEL:
         if (g.fullscreen) toggle_fullscreen();
         break;
-    case IDC_SPEED: {
-        int selected = 1;
-        for (int i = 0; i < 3; i++)
-            if (SPEED_HZ[i] == g.cpu_hz) selected = i;
-        choose_popup(g.speed, SPEED_NAME, IDM_SPEED_BASE, selected, 3);
-        break;
-    }
+    case IDC_SPEED: choose_popup(g.speed, speed_names(), IDM_SPEED_BASE, speed_index(), 3); break;
     case IDC_PALETTE: choose_popup(g.palette_button, PALETTE_NAME, IDM_PALETTE_BASE, g.palette, 3); break;
     default:
         if (id >= IDM_SPEED_BASE && id < IDM_SPEED_BASE + 3) set_speed(id - IDM_SPEED_BASE);
@@ -899,9 +1175,37 @@ int chip_key(UINT scan) {
     }
 }
 
+/* Game Boy buttons: arrows for the D-pad, X and Z where a Game Boy's A and B sit,
+ * Enter for Start, Backspace or right Shift for Select. */
+int gb_key(UINT scan, bool extended) {
+    if (extended) {
+        switch (scan) {
+        case 0x48: return GB_BUTTON_UP;    case 0x50: return GB_BUTTON_DOWN;
+        case 0x4B: return GB_BUTTON_LEFT;  case 0x4D: return GB_BUTTON_RIGHT;
+        case 0x1C: return GB_BUTTON_START; /* numeric keypad Enter */
+        default: return -1;
+        }
+    }
+    switch (scan) {
+    case 0x2D: return GB_BUTTON_A;      case 0x2C: return GB_BUTTON_B;
+    case 0x1C: return GB_BUTTON_START;
+    case 0x0E: case 0x36: return GB_BUTTON_SELECT;
+    default: return -1;
+    }
+}
+
+void set_gb_key(int button, bool held) {
+    g.gb_keys[button] = held;
+    if (g.gb) gb_set_button(g.gb, (GbButton)button, held ? 1 : 0);
+}
+
 void sync_key_display() {
     if (memcmp(g.shown_keys, g.machine.keys, sizeof(g.shown_keys)) != 0) {
         memcpy(g.shown_keys, g.machine.keys, sizeof(g.shown_keys));
+        invalidate_keys();
+    }
+    if (memcmp(g.shown_gb_keys, g.gb_keys, sizeof(g.shown_gb_keys)) != 0) {
+        memcpy(g.shown_gb_keys, g.gb_keys, sizeof(g.shown_gb_keys));
         invalidate_keys();
     }
 }
@@ -912,7 +1216,21 @@ bool handle_key(UINT message, WPARAM wparam, LPARAM lparam, bool main_has_focus)
     if (!down && !up) return false;
     UINT scan = (lparam >> 16) & 0xFF;
     bool extended = (lparam & (1 << 24)) != 0;
-    int key = extended ? -1 : chip_key(scan);
+    if (g.is_gb) {
+        int button = gb_key(scan, extended);
+        if (up) {
+            if (button < 0) return false;
+            set_gb_key(button, false);
+            sync_key_display();
+            return true;
+        }
+        if (button >= 0 && GetKeyState(VK_CONTROL) >= 0 && GetKeyState(VK_MENU) >= 0) {
+            if (!paused() && !(lparam & (1 << 30))) set_gb_key(button, true);
+            sync_key_display();
+            return true;
+        }
+    }
+    int key = extended || g.is_gb ? -1 : chip_key(scan);
     if (up) {
         if (key < 0) return false;
         chip8_set_key(&g.machine, (uint8_t)key, 0);
@@ -1009,6 +1327,27 @@ void tick() {
     uint64_t now = SDL_GetTicksNS(), elapsed = now - g.previous;
     g.previous = now;
     char error[256];
+    if (g.is_gb) {
+        if (!paused() &&
+            !gb_advance_ns(g.gb, elapsed, GB_SPEED_PERCENT[g.gb_speed], error, sizeof(error))) {
+            g.fault = error;
+            write_save();
+            release_keys();
+            update_controls();
+            show_alert(widen(error));
+        }
+        sync_audio();
+        pump_gb_audio();
+        sync_key_display();
+        if (gb_frame_count(g.gb) != g.gb_frame_seen) invalidate_well();
+        /* Games write their save RAM in bursts; settle for a second before writing. */
+        if (!g.save_path.empty() && gb_save_dirty(g.gb)) {
+            if (!g.save_due) g.save_due = now + 1000000000u;
+            else if (now >= g.save_due) write_save();
+        }
+        g.in_tick = false;
+        return;
+    }
     if (!chip8_scheduler_advance(&g.machine, &g.scheduler, elapsed, paused(), timer_tick, NULL, error,
                                  sizeof(error))) {
         g.fault = error;
@@ -1063,6 +1402,37 @@ bool capture_client(const std::wstring &path) {
     return ok;
 }
 
+/* A minimal 32 KB cartridge: a valid header and a JR -2 loop at the entry point,
+ * so the Game Boy path can be checked without shipping a ROM. */
+std::vector<uint8_t> snapshot_cartridge() {
+    static const uint8_t logo[48] = {
+        0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B, 0x03, 0x73, 0x00, 0x83, 0x00, 0x0C, 0x00, 0x0D,
+        0x00, 0x08, 0x11, 0x1F, 0x88, 0x89, 0x00, 0x0E, 0xDC, 0xCC, 0x6E, 0xE6, 0xDD, 0xDD, 0xD9, 0x99,
+        0xBB, 0xBB, 0x67, 0x63, 0x6E, 0x0E, 0xEC, 0xCC, 0xDD, 0xDC, 0x99, 0x9F, 0xBB, 0xB9, 0x33, 0x3E,
+    };
+    std::vector<uint8_t> rom(0x8000, 0);
+    memcpy(&rom[0x104], logo, sizeof(logo));
+    memcpy(&rom[0x134], "NACRECHECK", 10);
+    rom[0x100] = 0x18; /* JR -2 */
+    rom[0x101] = 0xFE;
+    return rom;
+}
+
+/* Presses and releases Right through the window's key path, then checks frames
+ * advance. Returns 0, or base..base+2 for the failing step. */
+int check_gb_keys(int base) {
+    const LPARAM right = (LPARAM)(1 | (0x4D << 16) | (1 << 24)); /* extended scan code */
+    SendMessageW(g.hwnd, WM_KEYDOWN, VK_RIGHT, right);
+    if (!g.gb_keys[GB_BUTTON_RIGHT]) return base;
+    SendMessageW(g.hwnd, WM_KEYUP, VK_RIGHT, right | (LPARAM)(3u << 30));
+    if (g.gb_keys[GB_BUTTON_RIGHT]) return base + 1;
+    char error[256];
+    uint32_t frames = gb_frame_count(g.gb);
+    if (!gb_run_cycles(g.gb, GB_CLOCK_HZ / 5, error, sizeof(error)) || gb_frame_count(g.gb) - frames < 10)
+        return base + 2;
+    return 0;
+}
+
 /* Exercise native actions and the physical keypad path before rendering, like
  * the Mac snapshot. Returns 0 on success or a nonzero stage number. */
 int run_snapshot() {
@@ -1076,12 +1446,33 @@ int run_snapshot() {
     SendMessageW(g.hwnd, WM_COMMAND, IDM_RESTART, 0);
     if (g.rom.empty() || !g.fault.empty()) return 4;
     g.focus_paused = false;
+    char error[256];
+    if (g.is_gb) {
+        /* Launched with a cartridge: check its keys, run it a while, and capture it. */
+        int stage = check_gb_keys(12);
+        if (stage) return stage;
+        if (!gb_run_cycles(g.gb, (uint32_t)(GB_CLOCK_HZ * g.snapshot_seconds), error, sizeof(error)))
+            return 15;
+        invalidate_all();
+        return capture_client(g.snapshot_path) ? 0 : 1;
+    }
     /* The X key sits at physical scan code 0x2D and maps to CHIP-8 key 0. */
     SendMessageW(g.hwnd, WM_KEYDOWN, 'X', (LPARAM)(1 | (0x2D << 16)));
     if (!g.machine.keys[0]) return 5;
     SendMessageW(g.hwnd, WM_KEYUP, 'X', (LPARAM)(1 | (0x2D << 16) | (3u << 30)));
     if (g.machine.keys[0]) return 6;
-    char error[256];
+
+    /* The Game Boy path on a stand-in cartridge, then back to the CHIP-8 ROM. */
+    std::vector<uint8_t> rom = g.rom;
+    std::wstring rom_path = g.rom_path;
+    bool bundled = g.rom_bundled;
+    load_candidate(snapshot_cartridge(), L"", false);
+    if (!g.is_gb || !g.fault.empty()) return 7;
+    int stage = check_gb_keys(8);
+    if (stage) return stage;
+    load_candidate(rom, rom_path, bundled);
+    if (g.is_gb) return 11;
+
     chip8_scheduler_advance(&g.machine, &g.scheduler, 200000000, 0, NULL, NULL, error, sizeof(error));
     invalidate_all();
     return capture_client(g.snapshot_path) ? 0 : 1;
@@ -1151,7 +1542,9 @@ void refresh_menu(HMENU menu) {
         CheckMenuItem(menu, IDM_SOUND, MF_BYCOMMAND | (g.muted ? MF_UNCHECKED : MF_CHECKED));
     } else if (menu == g.speed_menu) {
         for (int i = 0; i < 3; i++)
-            if (SPEED_HZ[i] == g.cpu_hz) CheckMenuRadioItem(menu, 0, 2, (UINT)i, MF_BYPOSITION);
+            ModifyMenuW(menu, (UINT)i, MF_BYPOSITION | MF_STRING, (UINT_PTR)(IDM_SPEED_BASE + i),
+                        speed_names()[i]);
+        CheckMenuRadioItem(menu, 0, 2, (UINT)speed_index(), MF_BYPOSITION);
     } else if (menu == g.palette_menu) {
         CheckMenuRadioItem(menu, 0, 2, (UINT)g.palette, MF_BYPOSITION);
     }
@@ -1292,8 +1685,12 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         return 0;
     }
     case WM_CLOSE:
+        write_save();
         save_placement();
         DestroyWindow(hwnd);
+        return 0;
+    case WM_ENDSESSION:
+        if (wparam) write_save();
         return 0;
     case WM_DESTROY:
         KillTimer(hwnd, TIMER_TICK);
@@ -1304,13 +1701,14 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
     return DefWindowProcW(hwnd, message, wparam, lparam);
 }
 
-/* Game keys must work even when a sidebar button holds keyboard focus. */
-bool route_child_key(const MSG &msg) {
-    if (msg.hwnd == g.hwnd || !IsChild(g.hwnd, msg.hwnd)) return false;
+/* Game keys must work even when a sidebar button holds keyboard focus, and must
+ * reach the game before dialog navigation claims arrows, Enter and Backspace. */
+bool route_game_key(const MSG &msg) {
+    if (msg.hwnd != g.hwnd && !IsChild(g.hwnd, msg.hwnd)) return false;
     if (msg.message != WM_KEYDOWN && msg.message != WM_KEYUP && msg.message != WM_SYSKEYDOWN &&
         msg.message != WM_SYSKEYUP)
         return false;
-    return handle_key(msg.message, msg.wParam, msg.lParam, false);
+    return handle_key(msg.message, msg.wParam, msg.lParam, msg.hwnd == g.hwnd);
 }
 
 bool initialize(int show) {
@@ -1328,6 +1726,9 @@ bool initialize(int show) {
     if (g.palette < 0 || g.palette > 2) g.palette = 0;
     g.cpu_hz = reg_dword(L"cpuHz", CHIP8_DEFAULT_CPU_HZ);
     if (g.cpu_hz != 300 && g.cpu_hz != 600 && g.cpu_hz != 1000) g.cpu_hz = CHIP8_DEFAULT_CPU_HZ;
+    g.gb_speed = (int)reg_dword(L"gbSpeed", 1);
+    if (g.gb_speed < 0 || g.gb_speed > 2) g.gb_speed = 1;
+    g.gb = gb_create();
     if (!g.ephemeral) load_recents();
     chip8_init(&g.machine, 0x4E414352u);
     chip8_scheduler_init(&g.scheduler, g.cpu_hz);
@@ -1357,7 +1758,7 @@ bool initialize(int show) {
     g.tooltips = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, NULL, WS_POPUP | TTS_ALWAYSTIP,
                                  CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, g.hwnd,
                                  NULL, g.instance, NULL);
-    g.open = make_button(IDM_OPEN, L"Open a CHIP-8 ROM (Ctrl+O)");
+    g.open = make_button(IDM_OPEN, L"Open a CHIP-8 or Game Boy ROM (Ctrl+O)");
     g.pause = make_button(IDM_PAUSE, L"Pause or resume (Space)");
     g.restart = make_button(IDM_RESTART, L"Restart the loaded ROM (Ctrl+R)");
     g.sound = make_button(IDM_SOUND, L"Toggle sound (M)");
@@ -1382,14 +1783,24 @@ bool initialize(int show) {
     g.audio.stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec,
                                                audio_callback, &g.audio);
     g.audio_available = g.audio.stream && SDL_ResumeAudioStreamDevice(g.audio.stream);
+    /* The Game Boy pushes stereo samples itself; its stream stays paused until a
+     * cartridge runs. */
+    SDL_AudioSpec gb_spec = {SDL_AUDIO_S16, 2, (int)GB_AUDIO_SAMPLE_RATE};
+    g.gb_stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &gb_spec, NULL, NULL);
 
     ShowWindow(g.hwnd, show);
     return true;
 }
 
 void shutdown() {
+    write_save();
     SDL_SetAtomicInt(&g.audio.active, 0);
     if (g.audio.stream) SDL_DestroyAudioStream(g.audio.stream);
+    if (g.gb_stream) SDL_DestroyAudioStream(g.gb_stream);
+    delete g.gb_bitmap;
+    g.gb_bitmap = NULL;
+    gb_destroy(g.gb);
+    g.gb = NULL;
     for (auto &entry : g.fonts) delete entry.second;
     g.fonts.clear();
 }
@@ -1401,10 +1812,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     std::wstring rom_argument;
     int argc = 0;
     wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    g.snapshot_seconds = 0.2;
     for (int i = 1; argv && i < argc; i++) {
         if (wcscmp(argv[i], L"--snapshot") == 0 && i + 1 < argc) {
             g.snapshot_path = argv[++i];
             g.ephemeral = true;
+        } else if (wcscmp(argv[i], L"--seconds") == 0 && i + 1 < argc) {
+            g.snapshot_seconds = std::min(std::max(_wtof(argv[++i]), 0.0), 600.0);
         } else {
             rom_argument = argv[i];
         }
@@ -1431,7 +1845,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         MSG msg;
         while (GetMessageW(&msg, NULL, 0, 0) > 0) {
             if (g.accel && TranslateAcceleratorW(g.hwnd, g.accel, &msg)) continue;
-            if (route_child_key(msg)) continue;
+            if (route_game_key(msg)) continue;
             if (IsDialogMessageW(g.hwnd, &msg)) continue;
             TranslateMessage(&msg);
             DispatchMessageW(&msg);

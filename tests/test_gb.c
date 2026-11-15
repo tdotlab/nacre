@@ -287,6 +287,33 @@ static int builtin_checks(void) {
         failures++;
     }
 
+    /* Wall-clock pacing: one second in 60 slices is one second of cycles (give or
+     * take the last instruction), speed scales it, and a long stall is capped. */
+    {
+        int slice;
+        uint64_t start;
+        rom[0x155] = 0x18; rom[0x156] = 0xFE; /* JR -2 instead of the illegal opcode */
+        gb_load_rom(gb, rom, sizeof rom, error, sizeof error);
+        start = gb->cycles;
+        for (slice = 0; slice < 60; slice++) gb_advance_ns(gb, 16666667u, 100, error, sizeof error);
+        if (gb->cycles - start < GB_CLOCK_HZ || gb->cycles - start > GB_CLOCK_HZ + 24) {
+            printf("FAIL builtin: 1 s at 100%% ran %llu cycles\n", (unsigned long long)(gb->cycles - start));
+            failures++;
+        }
+        start = gb->cycles;
+        gb_advance_ns(gb, 100000000u, 200, error, sizeof error);
+        if (gb->cycles - start < GB_CLOCK_HZ / 5 - 24 || gb->cycles - start > GB_CLOCK_HZ / 5 + 24) {
+            printf("FAIL builtin: 100 ms at 200%% ran %llu cycles\n", (unsigned long long)(gb->cycles - start));
+            failures++;
+        }
+        start = gb->cycles;
+        gb_advance_ns(gb, 5000000000u, 100, error, sizeof error);
+        if (gb->cycles - start > GB_CLOCK_HZ / 4 + 24) {
+            printf("FAIL builtin: a 5 s stall was not capped\n");
+            failures++;
+        }
+    }
+
     gb_destroy(gb);
     if (!failures) printf("ok   builtin checks\n");
     return failures;

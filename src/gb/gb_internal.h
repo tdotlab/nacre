@@ -120,6 +120,8 @@ struct Gb {
     uint8_t buttons;      /* bit per GbButton, 1 = held */
 
     uint64_t cycles;
+    uint64_t pace_target;    /* cycle count gb_advance_ns is aiming for */
+    uint64_t pace_fraction;  /* sub-cycle remainder, in cycle-nanoseconds */
 
     GbPpu ppu;
     GbApu apu;

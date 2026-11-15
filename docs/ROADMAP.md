@@ -52,16 +52,20 @@ A built-in check covers the MBC3 save and RTC round trip. Donkey Kong (1994) als
 
 No Game Boy audio has been heard yet. The APU passes the `dmg_sound` register and timing tests, but that is not a listening check.
 
-Next is step 5, getting the apps to play `.gb` files:
+Step 5 is done on Windows. The app picks the core by cartridge header. It runs
+wall-clock-paced emulation at 0.5×, 1× or 2×, plays stereo audio, and shows the
+160×144 screen in four shades of each palette, with D-pad/A/B/Select/Start
+keycaps. It keeps `.sav` files beside the ROM and accepts `.gb`/`.gbc` in Open.
+The snapshot self-check covers the Game Boy key and frame path on a stand-in
+cartridge. Local `--seconds 10 --snapshot` runs show the title or intro of
+Donkey Kong, DuckTales, Link's Awakening, Super Mario Land 2 and Wario Land
+rendering correctly.
 
-- Detect the ROM type by header or extension.
-- Run frame-paced emulation with the speed control.
-- Play audio through the SDL3 stream.
-- Show a 160×144 display with four-shade Fern/Amber/Pearl palettes.
-- Show D-pad/A/B/Select/Start keycaps and key mapping.
-- Store `.sav` files beside the ROM.
-- Accept `.gb`/`.gbc` in the Open dialog.
-- Extend the snapshot self-checks.
+Not yet checked by a person: hearing the audio, playing with real key input,
+and a save surviving an exit and relaunch.
+
+Still to do for step 5: the Linux SDL frontend (`src/desktop/main.c`) and the Mac
+app (`src/macos/main.m`, verifiable here only through CI).
 
 Known gaps for step 6:
 

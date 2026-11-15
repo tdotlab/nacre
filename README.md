@@ -1,6 +1,6 @@
 # Nacre
 
-A compact CHIP-8 interpreter with native Mac and Windows apps, a portable SDL3 frontend for Linux, and a terminal interface. All of them use the same C emulator core and sound oscillator. A Game Boy (DMG) core is in progress alongside it; see [Game Boy core](#game-boy-core).
+A compact CHIP-8 interpreter with native Mac and Windows apps, a portable SDL3 frontend for Linux, and a terminal interface. All of them use the same C emulator core and sound oscillator. A Game Boy (DMG) core sits alongside it; the Windows app already plays Game Boy cartridges, and the Mac and Linux frontends are next. See [Game Boy core](#game-boy-core).
 
 ![Nacre Mac interface](screenshots/nacre-macos.png)
 
@@ -73,6 +73,7 @@ bytes, so it still works if the original file was moved.
 | Action | Mac | Windows | SDL frontend (Linux) |
 | --- | --- | --- | --- |
 | CHIP-8 keypad | `1–4`, `QWER`, `ASDF`, `ZXCV` | Same (by physical key position) | Same |
+| Game Boy buttons | Not yet | Arrows, `X` = A, `Z` = B, `Enter` = Start, `Backspace` or right `Shift` = Select | Not yet |
 | Pause / resume | `Space` or `⌘P` | `Space` or `Ctrl+P` | `Space` |
 | Restart ROM | `⌘R` or `F2` | `Ctrl+R` or `F2` | `F2` |
 | Sound | `M` | `M` | `M` |
@@ -89,7 +90,8 @@ The preview is unsigned and unnotarized. A normal downloadable release still nee
 signing and notarization.
 
 Windows CI builds with the MSVC toolchain, runs the same style of self-check
-(pause, mute, restart, physical key down/up, then a capture of the real window),
+(pause, mute, restart, physical key down/up, the Game Boy key and frame path on a
+stand-in cartridge, then a capture of the real window),
 and uploads the unsigned `Nacre.exe`. Windows SmartScreen will warn about it until
 it is code-signed. Those checks do not establish audible output or hands-on
 acceptance on real hardware.
@@ -149,8 +151,7 @@ second. The default output path is `nacre.wav`.
 ## Game Boy core
 
 `src/gb/` is a separate C99 core for the original Game Boy (DMG), exposed through
-`include/gb.h`. The apps do not load Game Boy ROMs yet; that is the next milestone.
-It covers:
+`include/gb.h`. It covers:
 
 - An SM83 CPU stepped per memory cycle, with timers and interrupts.
 - A per-dot PPU covering background, window and sprites.
@@ -160,6 +161,18 @@ It covers:
 - The four-channel APU, mixed down to 48 kHz stereo.
 
 Game Boy Color-only cartridges are refused with a clear error.
+
+The Windows app opens `.gb` files (and Color carts that also run on the original
+model) from Open ROM, drag and drop, recent files, or the command line. It decides
+by the cartridge header, not the extension. It shows the 160×144 screen in four
+shades of the chosen palette, with D-pad, A/B, Select and Start keycaps. The speed
+control switches to Half, Normal and Double, and the sound is stereo. Battery
+cartridges save to a `.sav` file beside the ROM (`Tetris.gb` → `Tetris.sav`). The
+save is written about a second after the game changes it, and again on restart,
+on loading another ROM, and on exit. Each write goes to a temporary file first and
+then replaces the old save. A `.sav` that doesn't fit the cartridge is left
+untouched. `Nacre.exe ROM --seconds N --snapshot out.png` runs a cartridge for N
+seconds and captures the window.
 
 The core is checked against public test ROMs, which are fetched into the ignored cache and never committed:
 
