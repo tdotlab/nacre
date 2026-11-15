@@ -14,6 +14,9 @@ audio devices.
 | `src/gb/gb_ppu.c` | Per-dot PPU: modes, STAT/LYC edges, VRAM/OAM access windows, span render (BG, window, sprites), OAM corruption |
 | `src/gb/gb_apu.c` | Four channels, frame sequencer, 48 kHz stereo mix |
 | `src/gb/gb_cart.c` | Header checks, MBC1 (and multicart)/2/3/5, RTC, `.sav` format |
+| `src/gb/gb_state.c` | Game Boy save states: whole-machine snapshot with a build/ROM check; bad input is rejected without side effects |
+| `include/gb_input.h`, `src/gb_input.c` | Platform-neutral Game Boy key bindings: defaults, lookup, steal-on-assign, text form for preferences |
+| `src/desktop/pad.c` | SDL3 gamepad layer shared by the Mac, Windows and Linux frontends |
 | `tests/test_gb.c`, `tools/get-gb-test-roms.py` | ROM-driven core checks; headless run/dump/press tool |
 | `src/macos/main.m` | ARC-managed AppKit app, native menus/panels, display, controls, SDL3 audio, Game Boy display/keys/`.sav` |
 | `src/macos/Info.plist.in` | Mac identity, version, document associations, OS requirement |

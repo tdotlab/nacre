@@ -74,6 +74,9 @@ bytes, so it still works if the original file was moved.
 | --- | --- | --- | --- |
 | CHIP-8 keypad | `1–4`, `QWER`, `ASDF`, `ZXCV` | Same (by physical key position) | Same |
 | Game Boy buttons | Arrows or `WASD`, `X`/`K` = A, `Z`/`J` = B, `Return` = Start, `Delete` or right `Shift` = Select | Arrows or `WASD`, `X`/`K` = A, `Z`/`J` = B, `Enter` = Start, `Backspace` or right `Shift` = Select | Same |
+| Game Boy fast-forward | Hold `Tab` (4×, silent) | Same | Same |
+| Game Boy save state / load / next slot | `F5` / `F7` / `F6` (also Session menu) | `F5` / `F7` / `F6` | `F5` / `F7` / `F6` |
+| Rebind Game Boy keys | Session → Controls… (`⌘,`) | Session menu → Controls… | `F10` |
 | Game Boy speed / palette | Sidebar popups | Sidebar or Session/View menus | `F3` / `F4` (shown in the title bar) |
 | Pause / resume | `Space` or `⌘P` | `Space` or `Ctrl+P` | `Space` |
 | Restart ROM | `⌘R` or `F2` | `Ctrl+R` or `F2` | `F2` |
@@ -187,6 +190,31 @@ and palette popups keep separate choices for CHIP-8 and Game Boy.
 The Linux SDL frontend does the same in its plainer window: the same keys, the
 same `.sav` handling, stereo sound, and integer-scaled four-shade output. `F3`
 cycles the speed and `F4` the palette, and you can also drop a file onto the window.
+
+### Controllers, save states, fast-forward and rebinding
+
+All three frontends share the same Game Boy input features.
+
+A controller (anything SDL3 recognises as a gamepad) works with no setup: D-pad or left
+stick, east/north for A, south/west for B, Start and Back. A right shoulder button or
+either trigger fast-forwards while held. Holding the left shoulder button turns Start,
+Back and the top face button into save state, load state and next slot. Only the focused,
+unpaused window listens.
+
+Save states have four slots, stored beside the ROM as `Tetris.state1` to `Tetris.state4`.
+The bundled demo and ROMs opened without a path have nowhere to put them. A state is
+tied to the build that wrote it: a state from another game, another build, or a damaged
+file is rejected and the running game is left alone. Loading discards queued audio and
+keeps battery saves safe by marking the cartridge RAM dirty.
+
+Fast-forward runs at 4× while the key is held and mutes the Game Boy audio, because
+four-times audio is a squeal.
+
+Every action has two keys. The rebinding window (see the table above for how to open it)
+lists them: click or select a cell and press the new key. A key belongs to one action, so
+binding it takes it from the old owner. `Esc` cancels, `Delete` clears, and reserved keys
+(pause, mute, restart, `Esc`, the modifiers) are refused. Bindings persist: the Windows registry,
+Mac `NSUserDefaults`, and `controls.txt` in the SDL preferences folder on Linux.
 
 The core is checked against public test ROMs, which are fetched into the ignored cache and never committed:
 

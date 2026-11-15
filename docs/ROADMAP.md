@@ -92,6 +92,16 @@ test's own code at $C000, so it restarts forever. The combined ROM checks the
 same CRC without that log and passes, so our timing and patterns match the
 recorded hardware result.
 
+Step 7 added input and state on the Game Boy side of all three frontends: SDL3 gamepad
+support, four save-state slots, hold-to-fast-forward at 4× and rebindable keys.
+The core (`src/gb/gb_state.c`) serialises the machine; the platform-neutral
+`src/gb_input.c` owns bindings and their text form; `src/desktop/pad.c` is the shared
+controller layer. `tests/test_gb_input.c` and the core state tests run in `make test`.
+The Windows, Linux and Mac stages each built in CI, and the Mac `--snapshot` check now
+drives fast-forward and a save-state round trip. Not checked by a person: a real
+controller, the rebinding windows by hand, how fast-forward and state loads feel and
+sound, and the Linux and Mac frontends on real machines.
+
 What remains:
 
 - A real pixel FIFO. Spans put mid-line writes at about the right pixel, but
@@ -148,8 +158,9 @@ is authorized by this roadmap.
 ## Later features
 
 Prioritize compatibility profiles and useful diagnostics, then recent-session
-recovery, controller input, screenshots, and a small ROM library. Save states need
-a versioned format with ROM identity, profile, RNG, and machine state. SUPER-CHIP,
+recovery, screenshots, and a small ROM library. Game Boy save states exist but are
+build-specific; a portable, versioned format (and CHIP-8 states) with ROM identity,
+profile, RNG, and machine state is still open. SUPER-CHIP,
 XO-CHIP, rewind, and web builds each deserve a separate scope decision.
 
 ## Suggested implementation settings
