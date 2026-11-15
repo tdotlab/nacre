@@ -31,6 +31,11 @@ add_library(nacre_core STATIC
     src/chip8.c
     src/scheduler.c
     src/audio.c
+    src/gb/gb.c
+    src/gb/gb_cpu.c
+    src/gb/gb_ppu.c
+    src/gb/gb_apu.c
+    src/gb/gb_cart.c
 )
 target_include_directories(nacre_core PUBLIC include)
 target_compile_features(nacre_core PUBLIC c_std_99)

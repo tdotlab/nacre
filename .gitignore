@@ -9,3 +9,5 @@
 *.wav
 
 tests/test_demo
+/tests/test_gb
+*.sav

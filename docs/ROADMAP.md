@@ -31,6 +31,48 @@ audible sound, the Open dialog, drag-and-drop from Explorer, the speed/palette
 menus, fullscreen, high-DPI and multi-monitor moves, recent files across
 restarts, and Narrator.
 
+## Game Boy
+
+Order of work:
+
+1. CPU.
+2. Timers, interrupts and PPU.
+3. Cartridges and saves.
+4. APU.
+5. The app frontends.
+6. Accuracy follow-up.
+
+Steps 1–4 are done at the core level. All 68 ROM checks pass:
+
+- Blargg: `cpu_instrs`, `instr_timing`, `mem_timing` (both), `halt_bug`, `dmg_sound` 01–08.
+- `dmg-acid2`, pixel-exact.
+- Mooneye: the timer, interrupt/HALT/EI/DI timing, OAM DMA, bit and DAA tests, and the MBC1, MBC2 and MBC5 tests.
+
+A built-in check covers the MBC3 save and RTC round trip. Donkey Kong (1994) also runs headlessly through the title, file select, intro and stage 1.
+
+No Game Boy audio has been heard yet. The APU passes the `dmg_sound` register and timing tests, but that is not a listening check.
+
+Next is step 5, getting the apps to play `.gb` files:
+
+- Detect the ROM type by header or extension.
+- Run frame-paced emulation with the speed control.
+- Play audio through the SDL3 stream.
+- Show a 160×144 display with four-shade Fern/Amber/Pearl palettes.
+- Show D-pad/A/B/Select/Start keycaps and key mapping.
+- Store `.sav` files beside the ROM.
+- Accept `.gb`/`.gbc` in the Open dialog.
+- Extend the snapshot self-checks.
+
+Known gaps for step 6:
+
+- Mid-scanline PPU effects.
+- The OAM corruption bug.
+- STAT-write and LY=153 quirks.
+- MBC1 multicarts.
+- Accuracy of the serial link beyond capture.
+
+Game Boy Color support is a separate scope decision.
+
 ## Next acceptance pass
 
 For Windows: run the CI artifact on a clean Windows 10 and 11 machine (SmartScreen
@@ -90,5 +132,6 @@ XO-CHIP, rewind, and web builds each deserve a separate scope decision.
 | Mac acceptance fixes / UI adaptation | Sol, high | Sonnet, high | Native event and packaging behavior needs careful checking |
 | Small specified controls or layout changes | Luna, max | Haiku, high | Bounded implementation with visual acceptance |
 | Compatibility and timing design | Sol, xhigh | Opus, high | Interacting machine profiles and state semantics |
+| Game Boy frontend integration | Sol, high | Opus, high | Three shells, audio streaming and save I/O must agree |
 
 Keep this document current rather than appending session history.

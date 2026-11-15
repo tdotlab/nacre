@@ -1,6 +1,6 @@
 # Nacre
 
-A compact CHIP-8 interpreter with native Mac and Windows apps, a portable SDL3 frontend for Linux, and a terminal interface. All of them use the same C emulator core and sound oscillator.
+A compact CHIP-8 interpreter with native Mac and Windows apps, a portable SDL3 frontend for Linux, and a terminal interface. All of them use the same C emulator core and sound oscillator. A Game Boy (DMG) core is in progress alongside it; see [Game Boy core](#game-boy-core).
 
 ![Nacre Mac interface](screenshots/nacre-macos.png)
 
@@ -146,6 +146,30 @@ second. The default output path is `nacre.wav`.
 
 `make clean` removes the compiled executable. The ROMs and generated WAV files are not tracked by Git.
 
+## Game Boy core
+
+`src/gb/` is a separate C99 core for the original Game Boy (DMG), exposed through
+`include/gb.h`. The apps do not load Game Boy ROMs yet; that is the next milestone.
+It covers:
+
+- An SM83 CPU stepped per memory cycle, with timers and interrupts.
+- A per-dot PPU covering background, window and sprites.
+- OAM DMA, serial and the joypad.
+- MBC1, MBC2, MBC3 (with the real-time clock) and MBC5 cartridges.
+- Battery saves as standard `.sav` files: cart RAM, plus the common 48-byte RTC trailer for MBC3.
+- The four-channel APU, mixed down to 48 kHz stereo.
+
+Game Boy Color-only cartridges are refused with a clear error.
+
+The core is checked against public test ROMs, which are fetched into the ignored cache and never committed:
+
+```sh
+python3 tools/get-gb-test-roms.py   # Blargg, dmg-acid2, Mooneye Test Suite
+make test                           # includes tests/test_gb (68 ROM checks + built-ins)
+```
+
+`tests/test_gb --run ROM --seconds N --dump out.pgm --press start:9` runs one ROM headlessly. It holds a button at a given time and writes the final frame, which is how real games are smoke-tested.
+
 ## License
 
 Nacre's source is released under the [MIT License](LICENSE). The apps statically
@@ -155,6 +179,6 @@ own authors and are not covered by this license.
 
 ## Development
 
-Run `make test` for the SDL-free scheduler and key-wait checks. The desktop source,
+Run `make test` for the SDL-free scheduler, key-wait and Game Boy checks (fetch the GB test ROMs first, or those checks are skipped). The desktop source,
 cross-platform build, and remaining Mac acceptance work are tracked in
 [the roadmap](docs/ROADMAP.md).

@@ -1,13 +1,20 @@
 # Nacre architecture
 
-The CHIP-8 machine, scheduler, and oscillator are C99. Platform interfaces own
-windows, input, ROM selection, preferences, and audio devices.
+The CHIP-8 machine, scheduler, and oscillator are C99, and so is the Game Boy core.
+Platform interfaces own windows, input, ROM selection, preferences, files, and
+audio devices.
 
 | Entry point | Responsibility |
 | --- | --- |
 | `src/chip8.c`, `include/chip8.h` | Machine state, instructions, ROM bytes, key edges |
 | `src/scheduler.c` | Independent CPU / 60 Hz timer clocks, bounded catch-up, pause |
 | `src/audio.c` | Shared tone generator, CLI WAV and optional SDL2 live sink |
+| `include/gb.h`, `src/gb/gb.c` | Game Boy API, bus/memory map, timer, serial, OAM DMA, joypad, audio ring |
+| `src/gb/gb_cpu.c` | SM83 CPU, interrupts, HALT/EI/DI timing |
+| `src/gb/gb_ppu.c` | Per-dot PPU: modes, STAT, line render (BG, window, sprites) |
+| `src/gb/gb_apu.c` | Four channels, frame sequencer, 48 kHz stereo mix |
+| `src/gb/gb_cart.c` | Header checks, MBC1/2/3/5, RTC, `.sav` format |
+| `tests/test_gb.c`, `tools/get-gb-test-roms.py` | ROM-driven core checks; headless run/dump/press tool |
 | `src/macos/main.m` | ARC-managed AppKit app, native menus/panels, display, controls, SDL3 audio |
 | `src/macos/Info.plist.in` | Mac identity, version, document associations, OS requirement |
 | `src/windows/main.cpp` | Win32 + GDI+ app: window, owner-drawn controls, menus, dialogs, drop target, registry prefs, SDL3 audio |
@@ -34,6 +41,26 @@ Mac loads a candidate machine before replacing the current session, retains ROM
 bytes for restart, and uses NSUserDefaults for speed/palette/mute. Invalid files
 leave the current machine intact. Native file menus and drag-and-drop converge on
 the same loader. Preferences never go inside the app bundle.
+
+## Game Boy core
+
+`Gb` is an opaque machine with no file, clock, or platform calls. Everything is
+driven by memory cycles. Each CPU memory access first advances the whole machine
+by one M-cycle (4 T-cycles), stepping the timer, serial, DMA, PPU, APU, and the
+MBC3 clock in that order, and only then touches the bus.
+
+Interrupts are sampled after the opcode-fetch cycle. When the CPU wakes from HALT,
+the halted cycle stands in for that fetch. These two rules are what the Mooneye
+timing tests pin down.
+
+The PPU renders a whole line when mode 3 starts, so mid-line register tricks are
+not modelled. Mode 3 length still follows SCX and the sprite count. The
+framebuffer holds shade indices 0–3, and the frontends choose the colors.
+
+Audio goes into a ring buffer of 48 kHz stereo `int16`. If nobody drains it, the
+oldest samples are dropped. Saves are byte buffers: `gb_save_write`/`gb_save_load`
+plus a dirty flag, and the frontend owns the `.sav` file. `gb_set_wall_clock`
+feeds real time to the MBC3 clock, which then catches up when a save is loaded.
 
 ## Presentation
 

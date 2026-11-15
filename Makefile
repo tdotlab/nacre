@@ -23,6 +23,9 @@ all: $(TARGET)
 $(TARGET): $(SOURCES) include/chip8.h include/audio.h include/scheduler.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $(SOURCES) $(LDLIBS) -lm
 
+GB_SOURCES = src/gb/gb.c src/gb/gb_cpu.c src/gb/gb_ppu.c src/gb/gb_apu.c src/gb/gb_cart.c
+GB_HEADERS = include/gb.h src/gb/gb_internal.h
+
 tests/test_scheduler: tests/test_scheduler.c src/chip8.c src/scheduler.c include/chip8.h include/scheduler.h
 	$(CC) -Iinclude $(CFLAGS) -o $@ tests/test_scheduler.c src/chip8.c src/scheduler.c
 
@@ -32,12 +35,17 @@ tests/test_core: tests/test_core.c src/chip8.c include/chip8.h
 tests/test_demo: tests/test_demo.c src/chip8.c src/scheduler.c include/chip8.h include/scheduler.h assets/roms/nacre.ch8
 	$(CC) -Iinclude $(CFLAGS) -o $@ tests/test_demo.c src/chip8.c src/scheduler.c
 
-test: tests/test_scheduler tests/test_core tests/test_demo
+tests/test_gb: tests/test_gb.c $(GB_SOURCES) $(GB_HEADERS)
+	$(CC) -Iinclude $(CFLAGS) -o $@ tests/test_gb.c $(GB_SOURCES)
+
+# Game Boy ROM checks are skipped unless tools/get-gb-test-roms.py has fetched them.
+test: tests/test_scheduler tests/test_core tests/test_demo tests/test_gb
 	./tests/test_scheduler
 	./tests/test_core
 	./tests/test_demo
+	./tests/test_gb .roms-cache/gb
 
 clean:
-	rm -f $(TARGET) tests/test_scheduler tests/test_core tests/test_demo
+	rm -f $(TARGET) tests/test_scheduler tests/test_core tests/test_demo tests/test_gb
 
 .PHONY: all clean test
