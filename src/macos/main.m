@@ -258,7 +258,8 @@ static void timer_tick(Chip8 *chip8, void *userdata) {
             controlPoint2:NSMakePoint(65 - i * 3, 48)];
         [arc stroke];
     }
-    NSFont *wordmark = [NSFont fontWithName:@"Georgia" size:31] ?: [NSFont systemFontOfSize:31];
+    NSFont *wordmark = [NSFont fontWithName:@"Georgia" size:31];
+    if (!wordmark) wordmark = [NSFont systemFontOfSize:31];
     [@"nacre" drawAtPoint:NSMakePoint(66, 22) withAttributes:@{
         NSFontAttributeName:wordmark, NSForegroundColorAttributeName:color(0x293D34)}];
     text(@"SESSION", NSMakeRect(26, 114, 174, 18), 10, NSFontWeightSemibold, 0x83867D, YES);
@@ -305,7 +306,7 @@ static void timer_tick(Chip8 *chip8, void *userdata) {
     text(name, NSMakeRect(254, 27, w - 430, 32), 23, NSFontWeightSemibold, 0x293D34, NO);
     NSString *kind = bundled ? @"PRESS A KEYPAD KEY TO SAY HELLO" : @"CHIP-8 ROM";
     if (c.isGB) {
-        NSString *cart = [NSString stringWithUTF8String:gb_title(c->gb)] ?: @"";
+        NSString *cart = [NSString stringWithUTF8String:gb_title(c->gb)];
         kind = cart.length ? [@"GAME BOY  ·  " stringByAppendingString:cart] : @"GAME BOY ROM";
     }
     text(kind, NSMakeRect(255, 63, w - 400, 18), 10, NSFontWeightMedium, 0x7B8479, YES);
@@ -320,7 +321,7 @@ static void timer_tick(Chip8 *chip8, void *userdata) {
     if (c.isGB) {
         [c drawGameBoyInWell:well];
     } else {
-        CGFloat scale = floor(MIN((well.size.width - 48) / 64, (well.size.height - 64) / 32));
+        CGFloat scale = floor(fmin((well.size.width - 48) / 64, (well.size.height - 64) / 32));
         CGFloat ox = floor(NSMidX(well) - 32 * scale), oy = floor(NSMidY(well) - 16 * scale);
         [[NSGraphicsContext currentContext] setShouldAntialias:NO];
         [color(INKS[c.palette]) setFill];
@@ -405,7 +406,7 @@ static void timer_tick(Chip8 *chip8, void *userdata) {
 }
 - (void)drawGameBoyInWell:(NSRect)well {
     if (!gb) return;
-    CGFloat scale = floor(MIN((well.size.width - 48) / GB_SCREEN_WIDTH,
+    CGFloat scale = floor(fmin((well.size.width - 48) / GB_SCREEN_WIDTH,
                               (well.size.height - 64) / GB_SCREEN_HEIGHT));
     if (scale < 1) scale = 1;
     CGFloat w = GB_SCREEN_WIDTH * scale, h = GB_SCREEN_HEIGHT * scale;
@@ -577,7 +578,7 @@ static void timer_tick(Chip8 *chip8, void *userdata) {
     NSNumber *size = nil;
     [url getResourceValue:&size forKey:NSURLFileSizeKey error:&readError];
     if (!size) {
-        [self alert:readError.localizedDescription ?: @"That file couldn't be read."]; return;
+        [self alert:readError ? readError.localizedDescription : @"That file couldn't be read."]; return;
     }
     if (size.unsignedLongLongValue > MAX_GB_ROM) {
         [self alert:@"That file is larger than any Game Boy cartridge (8 MB). Your current session has been kept."];
@@ -818,20 +819,33 @@ static void timer_tick(Chip8 *chip8, void *userdata) {
     if (snapshotPath) [self performSelector:@selector(captureSnapshot) withObject:nil afterDelay:0.5];
 }
 
-/* A minimal 32 KB cartridge: a valid header and a JR -2 loop at the entry point,
- * so the Game Boy path can be checked without shipping a ROM. */
+/* A minimal 32 KB cartridge with a valid header, so the Game Boy path can be
+ * checked without shipping a ROM. It waits for vblank, turns the LCD off, fills
+ * the top half of tile 1 with the darkest shade, puts that tile in the map's top
+ * left corner, turns the LCD back on and loops: the capture shows an 8x4 dark
+ * block in the screen's top-left corner, which proves orientation. */
 - (NSData *)snapshotCartridge {
     static const uint8_t logo[48] = {
         0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B, 0x03, 0x73, 0x00, 0x83, 0x00, 0x0C, 0x00, 0x0D,
         0x00, 0x08, 0x11, 0x1F, 0x88, 0x89, 0x00, 0x0E, 0xDC, 0xCC, 0x6E, 0xE6, 0xDD, 0xDD, 0xD9, 0x99,
         0xBB, 0xBB, 0x67, 0x63, 0x6E, 0x0E, 0xEC, 0xCC, 0xDD, 0xDC, 0x99, 0x9F, 0xBB, 0xB9, 0x33, 0x3E,
     };
+    static const uint8_t program[] = {
+        0xF0, 0x44, 0xFE, 0x90, 0x20, 0xFA, /* wait for LY == 144 */
+        0xAF, 0xE0, 0x40,                   /* LCD off */
+        0x21, 0x10, 0x80, 0x3E, 0xFF, 0x06, 0x08, 0x22, 0x05, 0x20, 0xFC, /* tile 1 rows 0-3 */
+        0x3E, 0x01, 0xEA, 0x00, 0x98,       /* map (0,0) = tile 1 */
+        0x3E, 0x91, 0xE0, 0x40,             /* LCD and background on */
+        0x18, 0xFE,                         /* JR -2 */
+    };
     NSMutableData *rom = [NSMutableData dataWithLength:0x8000];
     uint8_t *bytes = rom.mutableBytes;
     memcpy(bytes + 0x104, logo, sizeof(logo));
     memcpy(bytes + 0x134, "NACRECHECK", 10);
-    bytes[0x100] = 0x18; /* JR -2 */
-    bytes[0x101] = 0xFE;
+    bytes[0x100] = 0xC3; /* JP 0x0150 */
+    bytes[0x101] = 0x50;
+    bytes[0x102] = 0x01;
+    memcpy(bytes + 0x150, program, sizeof(program));
     return rom;
 }
 /* Presses and releases Right through the view's key path, then checks frames
@@ -855,16 +869,17 @@ static void timer_tick(Chip8 *chip8, void *userdata) {
         return base + 2;
     return 0;
 }
+- (BOOL)captureViewTo:(NSString *)path {
+    [self.view layoutSubtreeIfNeeded];
+    self.view.needsDisplay = YES;
+    [self.view displayIfNeeded];
+    NSBitmapImageRep *bitmap = [self.view bitmapImageRepForCachingDisplayInRect:self.view.bounds];
+    [self.view cacheDisplayInRect:self.view.bounds toBitmapImageRep:bitmap];
+    NSData *png = [bitmap representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+    return [png writeToFile:path atomically:YES];
+}
 - (void)finishSnapshot:(int)status {
-    if (status == 0) {
-        [self.view layoutSubtreeIfNeeded];
-        self.view.needsDisplay = YES;
-        [self.view displayIfNeeded];
-        NSBitmapImageRep *bitmap = [self.view bitmapImageRepForCachingDisplayInRect:self.view.bounds];
-        [self.view cacheDisplayInRect:self.view.bounds toBitmapImageRep:bitmap];
-        NSData *png = [bitmap representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
-        status = [png writeToFile:snapshotPath atomically:YES] ? 0 : 1;
-    }
+    if (status == 0) status = [self captureViewTo:snapshotPath] ? 0 : 1;
     snapshotStatus = status;
     [NSApp terminate:nil];
 }
@@ -904,8 +919,13 @@ static void timer_tick(Chip8 *chip8, void *userdata) {
     if (![self loadData:[self snapshotCartridge] url:nil] || !self.isGB || self.fault) {
         [self finishSnapshot:7]; return;
     }
+    /* Let the stand-in finish drawing before counting frames. */
+    if (!gb_run_cycles(gb, GB_CLOCK_HZ / 10, error, sizeof(error))) { [self finishSnapshot:7]; return; }
     int stage = [self checkGameBoyKeys:8];
     if (stage) { [self finishSnapshot:stage]; return; }
+    /* A second capture beside the first shows the Game Boy screen and keycaps. */
+    NSString *gbShot = [snapshotPath.stringByDeletingPathExtension stringByAppendingString:@"-gb.png"];
+    if (![self captureViewTo:gbShot]) { [self finishSnapshot:1]; return; }
     [self loadData:rom url:romURL];
     if (self.isGB) { [self finishSnapshot:11]; return; }
 
