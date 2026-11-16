@@ -11,8 +11,7 @@ static void iconFill(NSRect rect, unsigned rgb, CGFloat radius) {
 static NSImage *NacreIcon(void) {
     NSImage *icon = [[NSImage alloc] initWithSize:NSMakeSize(512, 512)];
     [icon lockFocus];
-    iconFill(NSMakeRect(28, 28, 456, 456), 0xE8E7DA, 100);
-    iconFill(NSMakeRect(52, 52, 408, 408), 0x243E32, 82);
+    iconFill(NSMakeRect(28, 28, 456, 456), 0x243E32, 100);
     [iconColor(0xCDDDC7) setStroke];
     for (int i = 0; i < 5; i++) {
         NSBezierPath *shell = [NSBezierPath bezierPath]; shell.lineWidth = 10;

@@ -60,8 +60,7 @@ inline void draw_icon(Gdiplus::Graphics &g, float size) {
     g.TranslateTransform(256.0f, 256.0f);
     g.ScaleTransform(fill, fill);
     g.TranslateTransform(-256.0f, -256.0f);
-    fill_round(g, 28, 28, 456, 456, 100, 0xE8E7DA);
-    fill_round(g, 52, 52, 408, 408, 82, 0x243E32);
+    fill_round(g, 28, 28, 456, 456, 100, 0x243E32);
     Gdiplus::Pen pen(color(0xCDDDC7), 10.0f);
     pen.SetStartCap(Gdiplus::LineCapRound);
     pen.SetEndCap(Gdiplus::LineCapRound);
