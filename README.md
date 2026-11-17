@@ -186,8 +186,9 @@ CHIP-8 programs opened from a file.
 
 The Mac app does the same in its own design: the same keys (`Return` for Start,
 `Delete` or right `Shift` for Select), `.sav` handling and stereo sound, and it
-accepts `.gb`/`.gbc` from Open, Finder, recent files and drag and drop. Its speed
-and palette popups keep separate choices for CHIP-8 and Game Boy.
+accepts `.gb`/`.gbc` from Open, Finder, recent files and drag and drop. Like the
+other desktop apps it runs every game through the core interface. Its speed popup
+shows CPU rates for CHIP-8 and real-time multiples for Game Boy, and remembers each.
 `Nacre.app/Contents/MacOS/Nacre ROM --seconds N --snapshot out.png` works as on Windows.
 
 The Linux SDL frontend does the same in its plainer window: the same keys, the

@@ -1,6 +1,8 @@
 # Project guidance
 
-Nacre has a shared C CHIP-8 core, a Game Boy (DMG) core in `src/gb/` (`gb_*`), an AppKit Mac interface, a native Win32/GDI+
+Nacre has a shared C CHIP-8 core, a Game Boy (DMG) core in `src/gb/` (`gb_*`), a
+system-agnostic core interface and session in `include/nacre_core.h`, `include/nacre_session.h`
+and `src/core/` that every desktop frontend runs games through, an AppKit Mac interface, a native Win32/GDI+
 Windows interface (`src/windows/`), an SDL3 frontend for Linux, and a
 terminal/headless frontend. Keep OS-specific
 interface and packaging code outside the emulator core. Keep `chip8_*` and `CHIP8_*` identifiers for

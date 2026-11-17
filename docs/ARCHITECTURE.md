@@ -22,7 +22,7 @@ audio devices.
 | `include/nacre_session.h`, `src/core/session.c` | One running game: core choice, candidate-swap open, sibling `.sav` with debounced writes, `.state1`..`.state4` slots, remembered per-core options; file I/O through host callbacks |
 | `src/desktop/audio_out.c` | SDL3 output for any core: one stream at the core's rate, speed as frequency ratio, 40-150 ms queue, silent fast-forward |
 | `tests/test_gb.c`, `tools/get-gb-test-roms.py` | ROM-driven core checks; headless run/dump/press tool |
-| `src/macos/main.m` | ARC-managed AppKit app, native menus/panels, display, controls, SDL3 audio, Game Boy display/keys/`.sav` |
+| `src/macos/main.m` | ARC-managed AppKit app: native menus/panels, drawn sidebar and display, rebinding sheet; runs every registered core through a session, with the same per-system look table as Windows |
 | `src/macos/Info.plist.in` | Mac identity, version, document associations, OS requirement |
 | `src/windows/main.cpp` | Win32 + GDI+ app: window, owner-drawn controls, menus, dialogs, drop target, registry prefs; runs every registered core through a session, with per-system looks (keypad or pad, speed in Hz or ×) keyed by core id |
 | `src/windows/branding.h` | Shell mark and icon geometry (same shapes as the Mac header), shared by the app and the icon tool |
@@ -36,20 +36,20 @@ audio devices.
 ## Thread and state ownership
 
 AppKit, the Win32 message loop, and the SDL event loop each run the game on
-their main thread. Windows and Linux hold one `NacreSession` and call
+their main thread. Each holds one `NacreSession` and calls
 `nacre_session_tick` each UI tick; `audio_out` pulls the core's samples into one
-SDL3 stream on that same thread. The Mac still drives the CHIP-8 machine and the
-Game Boy directly, and its CHIP-8 audio callback reads an atomic active flag and
-owns its oscillator. Mac schedules at 60 Hz using a
+SDL3 stream on that same thread. No frontend includes a system's own header: it
+reads frames, audio and labels through the core table and keys per-system wording
+off the core id. Mac schedules at 60 Hz using a
 common-mode NSTimer; Windows uses a 16 ms `SetTimer` with `timeBeginPeriod(1)`.
 Elapsed time comes from SDL's monotonic clock on both. The shared scheduler caps
 catch-up at 250 ms.
 Focus loss, panels, user pause, and execution faults stop advancement and silence
 playback. CPU speed changes leave the CHIP-8 timer frequency unchanged.
 
-Mac loads a candidate machine before replacing the current session, retains ROM
-bytes for restart, and uses NSUserDefaults for speed/palette/mute. Invalid files
-leave the current machine intact. Native file menus and drag-and-drop converge on
+The session loads a candidate core before replacing the running one, so invalid
+files leave the current game intact. Mac uses NSUserDefaults for speed, palette,
+mute, bindings and the state slot. Native file menus and drag-and-drop converge on
 the same loader. Preferences never go inside the app bundle.
 
 ## Game Boy core
@@ -96,22 +96,21 @@ feeds real time to the MBC3 clock, which then catches up when a save is loaded.
 `gb_advance_ns` turns wall time into cycles at a speed percentage and carries the
 fractional cycle, so a frontend calls it once per UI tick and stays exact over
 long runs. Cores are picked from the file's contents (`gb_rom_looks_valid`
-behind the registry's probe), not its extension. On Windows and Linux the session
-owns the `.sav`; the Mac shell still keeps both machines alive and switches
-between them. Saves are written a second after the cart goes dirty, and on
+behind the registry's probe), not its extension. The session owns the `.sav` on every
+frontend. Saves are written a second after the cart goes dirty, and on
 restart, load and exit, through a temporary file and an atomic rename
 (`MoveFileEx` on Windows, `NSDataWritingAtomic` on Mac, `SDL_RenamePath` on
-Linux). The Mac draws the 160×144 frame through a CGBitmapContext image with
-interpolation off, flipped for its top-left view coordinates. Game Boy audio is pushed into its own SDL3 stream: stereo, no
-callback, 48 kHz, resampled for 0.5×/2×. The queue is held between about 40 and
+Linux). The Mac draws multi-shade and RGB frames through a CGBitmapContext image with
+interpolation off, flipped for its top-left view coordinates. Core audio is pushed into one SDL3 stream: stereo, no
+callback, at the core's rate, resampled for 0.5×/2×. The queue is held between about 40 and
 150 ms, padding with silence when it runs short and dropping a batch when it
 runs long.
 
 ## Presentation
 
 Mac uses native AppKit controls and text drawing. Its custom view draws the shell
-mark, sidebar, live keycaps, status, and display surround. The 64×32 framebuffer
-uses centered integer scaling. Fern, Amber, and Pearl change pixel ink; the dark
+mark, sidebar, live keycaps (a keypad or a pad cross, from the core's table), status, and display
+surround. Square-pixel frames use centered integer scaling; others fit their aspect. Fern, Amber, and Pearl change pixel ink; the dark
 stage and warm chrome stay stable. The minimum window keeps all controls visible.
 The current design is intentionally light even under macOS dark appearance.
 
