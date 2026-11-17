@@ -39,6 +39,7 @@ add_library(nacre_core STATIC
     src/gb/gb_state.c
     src/gb_input.c
     src/core/registry.c
+    src/core/session.c
     src/core/chip8_core.c
     src/core/gb_core.c
 )
