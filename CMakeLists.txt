@@ -38,6 +38,9 @@ add_library(nacre_core STATIC
     src/gb/gb_cart.c
     src/gb/gb_state.c
     src/gb_input.c
+    src/core/registry.c
+    src/core/chip8_core.c
+    src/core/gb_core.c
 )
 target_include_directories(nacre_core PUBLIC include)
 target_compile_features(nacre_core PUBLIC c_std_99)
