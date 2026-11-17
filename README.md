@@ -227,10 +227,18 @@ make test                           # includes tests/test_gb (116 ROM checks + b
 
 ## License
 
-Nacre's source is released under the [MIT License](LICENSE). The apps statically
-link SDL3 (zlib license), whose notice ships beside them as
-`THIRD_PARTY_NOTICES.txt`. Downloaded game ROMs in `.roms-cache/` belong to their
-own authors and are not covered by this license.
+Copyright (c) 2026 tdotlab. Nacre is free software: you can redistribute it and/or
+modify it under the terms of the [GNU General Public License](LICENSE) as published
+by the Free Software Foundation, either version 3 of the License or (at your option)
+any later version. It comes with no warranty. Every build ships the license text as
+`LICENSE` beside the app, and the source is this repository.
+
+The apps statically link SDL3 (zlib license, compatible with the GPL), whose notice
+ships beside them as `THIRD_PARTY_NOTICES.txt`. Downloaded game ROMs in
+`.roms-cache/` belong to their own authors and are not covered by this license.
+
+Nacre was MIT licensed until 2026-11-17. Copies obtained from earlier commits stay
+under the MIT terms they came with; new work is GPL.
 
 ## Development
 

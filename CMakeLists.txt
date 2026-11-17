@@ -91,7 +91,12 @@ if(APPLE)
         HEADER_FILE_ONLY TRUE
         MACOSX_PACKAGE_LOCATION Resources
     )
-    target_sources(nacre-desktop PRIVATE assets/roms/nacre.ch8 "${SDL3_SOURCE_DIR}/LICENSE.txt")
+    set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/LICENSE" PROPERTIES
+        HEADER_FILE_ONLY TRUE
+        MACOSX_PACKAGE_LOCATION Resources
+    )
+    target_sources(nacre-desktop PRIVATE assets/roms/nacre.ch8 "${SDL3_SOURCE_DIR}/LICENSE.txt"
+        "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
 elseif(WIN32)
     # The icon is drawn from src/windows/branding.h at build time, like the Mac icon,
     # and embedded with the welcome ROM so Nacre.exe starts without sidecar files.
@@ -114,6 +119,9 @@ elseif(WIN32)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${SDL3_SOURCE_DIR}/LICENSE.txt"
                 "$<TARGET_FILE_DIR:nacre-desktop>/THIRD_PARTY_NOTICES.txt"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
+                "$<TARGET_FILE_DIR:nacre-desktop>/LICENSE"
         VERBATIM
     )
 else()
@@ -126,6 +134,9 @@ else()
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${SDL3_SOURCE_DIR}/LICENSE.txt"
                 "$<TARGET_FILE_DIR:nacre-desktop>/THIRD_PARTY_NOTICES.txt"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
+                "$<TARGET_FILE_DIR:nacre-desktop>/LICENSE"
         VERBATIM
     )
 endif()

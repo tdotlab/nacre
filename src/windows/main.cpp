@@ -1335,8 +1335,9 @@ void show_about() {
     release_keys();
     sync_audio();
     TaskDialog(g.hwnd, NULL, L"About Nacre", L"Nacre " NACRE_VERSION_W,
-               L"A small CHIP-8 and Game Boy machine.\nMade by tdotlab.\n\nSound uses SDL3, bundled under its "
-               L"zlib license (see THIRD_PARTY_NOTICES.txt).",
+               L"A small CHIP-8 and Game Boy machine.\nMade by tdotlab.\n\nFree software under the GNU GPL, "
+               L"version 3 or later (see LICENSE).\nSound uses SDL3, bundled under its zlib license "
+               L"(see THIRD_PARTY_NOTICES.txt).",
                TDCBF_OK_BUTTON, TD_INFORMATION_ICON, NULL);
     g.dialog_open = was_open;
     g.previous = SDL_GetTicksNS();

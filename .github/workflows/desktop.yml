@@ -23,6 +23,7 @@ jobs:
             artifact_path: |
               build/Release/Nacre.exe
               build/Release/THIRD_PARTY_NOTICES.txt
+              build/Release/LICENSE
               build/Release/Nacre-preview.png
           - os: ubuntu-latest
             platform: Linux
@@ -30,6 +31,7 @@ jobs:
               build/Nacre
               build/assets/hello.ch8
               build/THIRD_PARTY_NOTICES.txt
+              build/LICENSE
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

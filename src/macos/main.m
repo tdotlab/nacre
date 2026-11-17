@@ -1149,7 +1149,7 @@ static NSRect cell_rect(int row, int slot) {
 - (void)about:(id)sender {
     (void)sender; [NSApp orderFrontStandardAboutPanelWithOptions:@{
         @"ApplicationName":@"Nacre", @"ApplicationVersion":@"0.2.0",
-        @"Credits":[[NSAttributedString alloc] initWithString:@"A small CHIP-8 and Game Boy machine.\nMade by tdotlab."] }];
+        @"Credits":[[NSAttributedString alloc] initWithString:@"A small CHIP-8 and Game Boy machine.\nMade by tdotlab.\n\nFree software under the GNU GPL, version 3 or later (see LICENSE)."] }];
 }
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     (void)notification;
