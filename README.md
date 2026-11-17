@@ -188,8 +188,12 @@ and palette popups keep separate choices for CHIP-8 and Game Boy.
 `Nacre.app/Contents/MacOS/Nacre ROM --seconds N --snapshot out.png` works as on Windows.
 
 The Linux SDL frontend does the same in its plainer window: the same keys, the
-same `.sav` handling, stereo sound, and integer-scaled four-shade output. `F3`
-cycles the speed and `F4` the palette, and you can also drop a file onto the window.
+same `.sav` handling, stereo sound, and integer-scaled output. It runs games through
+the system-agnostic core interface, so `F3` (speed), `F4` (palette), fast-forward
+and save states work for CHIP-8 programs as well; the bundled welcome program has
+no file to keep states beside. A fault shows the message and halts the game until
+`F2` or another file, instead of closing the window. You can also drop a file onto
+the window.
 
 ### Controllers, save states, fast-forward and rebinding
 

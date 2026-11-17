@@ -63,8 +63,8 @@ elseif(WIN32)
 else()
     add_executable(nacre-desktop src/desktop/main.c)
 endif()
-# Controller input (SDL3 gamepads) is shared by all three desktop frontends.
-target_sources(nacre-desktop PRIVATE src/desktop/pad.c)
+# Controller input and audio output (SDL3) are shared by the desktop frontends.
+target_sources(nacre-desktop PRIVATE src/desktop/pad.c src/desktop/audio_out.c)
 target_link_libraries(nacre-desktop PRIVATE nacre_core SDL3::SDL3)
 set_target_properties(nacre-desktop PROPERTIES OUTPUT_NAME Nacre)
 

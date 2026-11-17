@@ -17,6 +17,10 @@ audio devices.
 | `src/gb/gb_state.c` | Game Boy save states: whole-machine snapshot with a build/ROM check; bad input is rejected without side effects |
 | `include/gb_input.h`, `src/gb_input.c` | Platform-neutral Game Boy key bindings: defaults, lookup, steal-on-assign, text form for preferences |
 | `src/desktop/pad.c` | SDL3 gamepad layer shared by the Mac, Windows and Linux frontends |
+| `include/nacre_core.h`, `src/core/registry.c` | System-agnostic core interface (stepped or threaded cores, framebuffer or native-surface video, emulation-locked stereo audio, positional pad, battery saves, states, options) and the built-in core registry with probe-based detection |
+| `src/core/chip8_core.c`, `src/core/gb_core.c` | CHIP-8 and Game Boy behind the core interface |
+| `include/nacre_session.h`, `src/core/session.c` | One running game: core choice, candidate-swap open, sibling `.sav` with debounced writes, `.state1`..`.state4` slots, remembered per-core options; file I/O through host callbacks |
+| `src/desktop/audio_out.c` | SDL3 output for any core: one stream at the core's rate, speed as frequency ratio, 40-150 ms queue, silent fast-forward |
 | `tests/test_gb.c`, `tools/get-gb-test-roms.py` | ROM-driven core checks; headless run/dump/press tool |
 | `src/macos/main.m` | ARC-managed AppKit app, native menus/panels, display, controls, SDL3 audio, Game Boy display/keys/`.sav` |
 | `src/macos/Info.plist.in` | Mac identity, version, document associations, OS requirement |
@@ -24,7 +28,7 @@ audio devices.
 | `src/windows/branding.h` | Shell mark and icon geometry (same shapes as the Mac header), shared by the app and the icon tool |
 | `src/windows/nacre.rc.in`, `nacre.manifest` | Embedded icon and welcome ROM, version info; comctl32 v6, PerMonitorV2 DPI |
 | `tools/windows-icon.cpp` | Build-time generator of `Nacre.ico` (PNG frames, 16–256 px) |
-| `src/desktop/main.c` | SDL3 window/input/file picker/drop/audio for Linux, CHIP-8 and Game Boy |
+| `src/desktop/main.c` | SDL3 window/input/file picker/drop for Linux; runs every registered core through a session and knows no system itself |
 | `src/main.c` | Terminal and headless CLI |
 | `CMakeLists.txt` | Platform selection, static SDL3, bundle/resources, Windows icon/rc/manifest |
 | `.github/workflows/desktop.yml` | OS builds, universal Mac artifact, native UI smoke capture on Mac and Windows |

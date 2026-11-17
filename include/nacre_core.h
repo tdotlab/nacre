@@ -53,8 +53,9 @@ enum {
 /* ---- Video ------------------------------------------------------------- */
 
 typedef enum {
-    /* One byte per pixel holding a shade index 0 .. levels-1, 0 the lightest.
-     * The host owns the palette. */
+    /* One byte per pixel holding a shade index 0 .. levels-1. 0 is the blank
+     * shade: an unlit pixel on a two-level display (CHIP-8), the lightest shade
+     * of an LCD (Game Boy). The host owns the palette. */
     NACRE_PIXEL_INDEX8 = 0,
     /* 0x00RRGGBB per pixel in native-endian uint32_t. */
     NACRE_PIXEL_XRGB8888 = 1

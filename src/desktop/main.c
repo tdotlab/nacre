@@ -1,9 +1,12 @@
-#include "audio.h"
-#include "chip8.h"
-#include "gb.h"
+/* The SDL3 frontend (Linux). It knows no emulated system: games run through a
+ * NacreSession, so every core in the registry works here, and the window only
+ * draws frames, plays sound, and turns keys and controllers into input. */
+
+#include "audio_out.h"
 #include "gb_input.h"
+#include "nacre_core.h"
+#include "nacre_session.h"
 #include "pad.h"
-#include "scheduler.h"
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
@@ -12,18 +15,15 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
 #define WINDOW_WIDTH 960
 #define WINDOW_HEIGHT 480
-#define AUDIO_CALLBACK_SAMPLES 1024
-#define MAX_CHIP8_ROM (CHIP8_MEMORY_SIZE - CHIP8_PROGRAM_START)
-#define MAX_GB_ROM (8u << 20) /* the largest MBC5 cartridge */
-#define MAX_SAVE (1u << 20)
-#define MAX_STATE (1u << 24)
-#define GB_FAST_PERCENT 400u /* while fast-forward is held */
-#define GB_STATE_SLOTS 4
+#define MAX_CONTENT (256u << 20) /* games read whole; disc images go by path */
+#define FAST_PERCENT 400u        /* while fast-forward is held */
+#define MAX_FILTERS 8
 
 enum {
     FILE_EVENT_OPENED = 1,
@@ -31,46 +31,38 @@ enum {
 };
 
 typedef struct {
-    SDL_AudioStream *stream;
-    SDL_AtomicInt active;
-    Chip8AudioOscillator oscillator;
-} DesktopAudio;
-
-typedef struct {
     SDL_Window *window;
     SDL_Renderer *renderer;
-    SDL_Texture *framebuffer;
-    SDL_Texture *gb_framebuffer;
+    SDL_Texture *texture;
+    unsigned tex_w, tex_h;
+    uint32_t *pixels; /* XRGB8888 staging for indexed frames */
+    size_t pixels_cap;
+    uint32_t shown_frame; /* frame_count last uploaded */
+    int shown_palette;
+    const void *shown_owner;
     bool sdl_initialized;
     Uint32 rom_event_type;
     SDL_AtomicInt dialog_pending;
-    DesktopAudio audio;
-    Chip8 machine;
-    Chip8Scheduler scheduler;
-    char *rom_path;
-    uint32_t seed;
-    bool audio_available;
+
+    NacreSession *session;
+    AudioOut *audio;
     bool muted;
     bool user_paused;
     bool focus_paused;
     bool quit_requested;
+    int speed;   /* index into speed_percent */
+    int palette; /* index into palette_light */
+    int applied_running;
+    unsigned applied_speed;
+    char last_save_note[320];
 
-    /* Game Boy session; `is_gb` says which machine is current. */
-    Gb *gb;
-    bool is_gb;
-    int gb_speed;   /* index into gb_speed_percent */
-    int gb_palette; /* index into gb_palette_light */
-    SDL_AudioStream *gb_stream;
-    bool gb_stream_running;
-    char *save_path; /* NULL when the cartridge has no battery */
-    uint64_t save_due;
-
-    /* Game Boy input: rebindable keys, a controller, hold-to-fast-forward. */
+    /* Input: rebindable keys, a controller, hold-to-fast-forward. Held actions are
+     * GBI_BIT flags; the button ones become pad input for cores that have a pad. */
     GbBindings keys;
-    bool kb_held[GB_BUTTON_COUNT]; /* buttons the keyboard holds */
-    unsigned pad_held, pad_seen;   /* controller actions now / last poll */
+    unsigned kb_held;
+    unsigned pad_held, pad_seen; /* controller actions now / last poll */
     bool ff_key, ff_on;
-    int slot; /* save-state slot, 0..GB_STATE_SLOTS-1 */
+    int slot; /* save-state slot, 0..NACRE_STATE_SLOTS-1 */
     char status[96];
     uint64_t status_until;
     char *prefs_path; /* controls.txt in the user's preference folder */
@@ -82,22 +74,22 @@ typedef struct {
     char rb_note[96];
 } App;
 
-static const SDL_DialogFileFilter rom_filters[] = {
-    { "Game ROMs", "ch8;gb;gbc;rom;bin" },
-    { "CHIP-8 ROMs", "ch8;rom;bin" },
-    { "Game Boy ROMs", "gb;gbc" },
-    { "All files", "*" }
-};
+/* File-dialog filters, built from the core registry at start. */
+static SDL_DialogFileFilter rom_filters[MAX_FILTERS];
+static int rom_filter_count;
+static char all_extensions[256];
 
-static const unsigned gb_speed_percent[3] = { 50, 100, 200 };
-static const char *const gb_speed_name[3] = { "0.5x", "1x", "2x" };
+static const unsigned speed_percent[3] = { 50, 100, 200 };
+static const char *const speed_name[3] = { "0.5x", "1x", "2x" };
 /* The desktop apps' Fern, Amber, and Pearl inks, shaded down to a dark green. */
-static const uint32_t gb_palette_light[3] = { 0xC3DCC7, 0xEBD8AF, 0xE8E9DF };
-static const char *const gb_palette_name[3] = { "Fern", "Amber", "Pearl" };
-#define GB_PALETTE_DARK 0x1E2A25u
+static const uint32_t palette_light[3] = { 0xC3DCC7, 0xEBD8AF, 0xE8E9DF };
+static const char *const palette_name[3] = { "Fern", "Amber", "Pearl" };
+#define PALETTE_DARK 0x1E2A25u
+#define SCREEN_BACKGROUND 0x18211Eu
 
 /* Arrows and WASD for the D-pad, X/K for A, Z/J for B, Enter for Start, Backspace or
- * right Shift for Select; Tab fast-forwards, F5 and F7 save and load, F6 changes slot. */
+ * right Shift for Select; Tab fast-forwards, F5 and F7 save and load, F6 changes slot.
+ * On a CHIP-8 keypad (1234/QWER/ASDF/ZXCV) the keypad takes those keys first. */
 static const int default_keys[GBI_COUNT][GBI_KEYS_PER_ACTION] = {
     { SDL_SCANCODE_RIGHT, SDL_SCANCODE_D },
     { SDL_SCANCODE_LEFT, SDL_SCANCODE_A },
@@ -113,142 +105,43 @@ static const int default_keys[GBI_COUNT][GBI_KEYS_PER_ACTION] = {
     { SDL_SCANCODE_F6, GBI_UNBOUND },
 };
 
-static void SDLCALL audio_callback(void *userdata, SDL_AudioStream *stream,
-                                   int additional_amount, int total_amount) {
-    (void)total_amount;
-    DesktopAudio *audio = (DesktopAudio *)userdata;
-    int remaining = (additional_amount + (int)sizeof(int16_t) - 1) /
-                    (int)sizeof(int16_t);
-    int16_t samples[AUDIO_CALLBACK_SAMPLES];
+static const NacreCore *current_core(const App *app) {
+    return app->session ? nacre_session_core(app->session) : NULL;
+}
 
-    while (remaining > 0) {
-        int count = remaining < AUDIO_CALLBACK_SAMPLES
-            ? remaining : AUDIO_CALLBACK_SAMPLES;
-        int active = SDL_GetAtomicInt(&audio->active) != 0;
-        chip8_audio_render_samples(&audio->oscillator, samples,
-                                   (size_t)count, active);
-        if (!SDL_PutAudioStreamData(stream, samples,
-                                    count * (int)sizeof(samples[0]))) {
-            return;
-        }
-        remaining -= count;
-    }
+static void *current_instance(const App *app) {
+    return app->session ? nacre_session_instance(app->session) : NULL;
 }
 
 static int is_paused(const App *app) {
     return app->user_paused || app->focus_paused || app->rebinding;
 }
 
-static void sync_audio(App *app) {
-    int active = !app->is_gb && app->audio_available && !app->muted &&
-                 !is_paused(app) && app->machine.sound_timer > 0;
-    SDL_SetAtomicInt(&app->audio.active, active);
+/* ---- Files: host I/O for the session --------------------------------------- */
 
-    bool gb_run = app->is_gb && app->gb_stream && !app->muted && !is_paused(app);
-    if (app->gb_stream && gb_run != app->gb_stream_running) {
-        SDL_ClearAudioStream(app->gb_stream);
-        if (gb_run) {
-            gb_audio_clear(app->gb);
-            SDL_ResumeAudioStreamDevice(app->gb_stream);
-        } else {
-            SDL_PauseAudioStreamDevice(app->gb_stream);
-        }
-        app->gb_stream_running = gb_run;
-    }
-}
-
-/* Moves this frame's Game Boy samples to the device. The emulator follows the
- * wall clock and the device its own crystal, so the queue is held between about
- * 40 and 150 ms: silence pads an underrun and a long queue drops a batch. */
-static void pump_gb_audio(App *app) {
-    static int16_t samples[4096 * 2];
-    static const int16_t silence[480 * 2] = { 0 };
-    if (!app->gb) return;
-    if (!app->gb_stream_running) {
-        gb_audio_clear(app->gb);
-        return;
-    }
-    if (app->ff_on) { /* four times faster is a squeal, not music: run silent, let the queue drain */
-        while (gb_audio_read(app->gb, samples, 4096) > 0) {}
-        return;
-    }
-    float ratio = (float)gb_speed_percent[app->gb_speed] / 100.0f;
-    SDL_SetAudioStreamFrequencyRatio(app->gb_stream, ratio);
-    const int bytes_per_ms = (int)(GB_AUDIO_SAMPLE_RATE / 1000u) * 4;
-    int queued = SDL_GetAudioStreamQueued(app->gb_stream);
-    bool drop = queued > (int)(150.0f * (float)bytes_per_ms * ratio);
-    if (queued >= 0 && queued < (int)(20.0f * (float)bytes_per_ms * ratio)) {
-        int pad = (int)(40.0f * (float)bytes_per_ms * ratio) - queued;
-        while (pad >= 4) {
-            int chunk = pad < (int)sizeof(silence) ? (pad & ~3) : (int)sizeof(silence);
-            SDL_PutAudioStreamData(app->gb_stream, silence, chunk);
-            pad -= chunk;
-        }
-    }
-    size_t frames;
-    while ((frames = gb_audio_read(app->gb, samples, 4096)) > 0) {
-        if (!drop) SDL_PutAudioStreamData(app->gb_stream, samples, (int)(frames * 4));
-    }
-}
-
-static void timer_tick(Chip8 *machine, void *userdata) {
-    App *app = (App *)userdata;
-    (void)machine;
-    sync_audio(app);
-}
-
-static void update_title(App *app) {
-    char title[160];
-    if (app->is_gb) {
-        const char *cart = gb_title(app->gb);
-        snprintf(title, sizeof(title), "Nacre - %s (Game Boy, %s, %s)%s",
-                 cart[0] ? cart : "untitled", gb_speed_name[app->gb_speed],
-                 gb_palette_name[app->gb_palette], app->user_paused ? " - paused" : "");
-    } else {
-        snprintf(title, sizeof(title), "Nacre%s", app->user_paused ? " - paused" : "");
-    }
-    SDL_SetWindowTitle(app->window, title);
-}
-
-/* Reads a whole file of 1..limit bytes into a new SDL_malloc buffer. */
-static uint8_t *read_file(const char *path, size_t limit, size_t *length,
-                          char *error, size_t error_capacity) {
+static NacreIoResult io_read(void *userdata, const char *path, size_t max_size, uint8_t **data,
+                             size_t *size) {
+    (void)userdata;
+    *data = NULL;
+    *size = 0;
+    if (!SDL_GetPathInfo(path, NULL)) return NACRE_IO_MISSING;
     SDL_IOStream *file = SDL_IOFromFile(path, "rb");
-    if (!file) {
-        snprintf(error, error_capacity, "cannot open '%s': %s", path, SDL_GetError());
-        return NULL;
-    }
-    Sint64 file_size = SDL_GetIOSize(file);
-    if (file_size <= 0 || (uint64_t)file_size > limit) {
+    if (!file) return NACRE_IO_FAILED;
+    Sint64 length = SDL_GetIOSize(file);
+    if (length < 0 || (uint64_t)length > max_size) {
         SDL_CloseIO(file);
-        snprintf(error, error_capacity, "'%s' is empty, too large, or cannot be measured", path);
-        return NULL;
+        return NACRE_IO_FAILED;
     }
-    uint8_t *bytes = (uint8_t *)SDL_malloc((size_t)file_size);
-    if (!bytes) {
-        SDL_CloseIO(file);
-        snprintf(error, error_capacity, "not enough memory to read '%s'", path);
-        return NULL;
-    }
-    if (SDL_ReadIO(file, bytes, (size_t)file_size) != (size_t)file_size) {
-        SDL_CloseIO(file);
-        SDL_free(bytes);
-        snprintf(error, error_capacity, "could not read '%s'", path);
-        return NULL;
-    }
+    uint8_t *bytes = (uint8_t *)malloc(length ? (size_t)length : 1);
+    bool ok = bytes && SDL_ReadIO(file, bytes, (size_t)length) == (size_t)length;
     SDL_CloseIO(file);
-    *length = (size_t)file_size;
-    return bytes;
-}
-
-/* "Tetris.gb" with ".sav" is "Tetris.sav" in the same folder; ".state2" is a save-state slot. */
-static char *sibling_path(const char *rom_path, const char *extension) {
-    const char *slash = strrchr(rom_path, '/');
-    const char *dot = strrchr(rom_path, '.');
-    size_t stem = (dot && (!slash || dot > slash + 1)) ? (size_t)(dot - rom_path) : strlen(rom_path);
-    char *path = NULL;
-    if (SDL_asprintf(&path, "%.*s%s", (int)stem, rom_path, extension) < 0) return NULL;
-    return path;
+    if (!ok) {
+        free(bytes);
+        return NACRE_IO_FAILED;
+    }
+    *data = bytes;
+    *size = (size_t)length;
+    return NACRE_IO_OK;
 }
 
 /* Writes a temporary file, then renames it over the old one so an interrupted
@@ -267,117 +160,152 @@ static bool write_atomic(const char *path, const void *data, size_t size) {
     return ok;
 }
 
-/* Writes changed cartridge RAM. */
-static void write_save(App *app) {
-    app->save_due = 0;
-    if (!app->is_gb || !app->save_path || !gb_save_dirty(app->gb)) return;
-    gb_set_wall_clock(app->gb, (int64_t)time(NULL));
-    size_t size = gb_save_size(app->gb);
-    uint8_t *data = size ? (uint8_t *)SDL_malloc(size) : NULL;
-    bool ok = false;
-    if (data) {
-        size = gb_save_write(app->gb, data, size);
-        ok = write_atomic(app->save_path, data, size);
-    }
-    if (ok) gb_save_mark_clean(app->gb);
-    else fprintf(stderr, "could not write the save '%s': %s\n", app->save_path, SDL_GetError());
-    SDL_free(data);
+static int io_write(void *userdata, const char *path, const uint8_t *data, size_t size) {
+    (void)userdata;
+    return write_atomic(path, data, size) ? 1 : 0;
 }
 
-static void read_save(App *app) {
-    char error[256];
-    size_t length = 0;
-    gb_set_wall_clock(app->gb, (int64_t)time(NULL));
-    if (!SDL_GetPathInfo(app->save_path, NULL)) return; /* no save yet */
-    uint8_t *data = read_file(app->save_path, MAX_SAVE, &length, error, sizeof(error));
-    if (data && gb_save_load(app->gb, data, length)) {
-        fprintf(stderr, "loaded the save '%s'\n", app->save_path);
+static int64_t io_now(void *userdata) {
+    (void)userdata;
+    return (int64_t)time(NULL);
+}
+
+static void host_log(void *userdata, NacreLogLevel level, const char *message) {
+    (void)userdata;
+    if (level >= NACRE_LOG_INFO) fprintf(stderr, "%s\n", message);
+}
+
+/* ---- Status and title ------------------------------------------------------ */
+
+/* A short message drawn over the game that clears itself after a few seconds. */
+static void set_status(App *app, const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    vsnprintf(app->status, sizeof(app->status), format, args);
+    va_end(args);
+    app->status_until = SDL_GetTicksNS() + 3000000000ull;
+}
+
+static const char *file_name(const char *path) {
+    const char *name = path;
+    for (const char *p = path; *p; p++)
+        if (*p == '/' || *p == '\\') name = p + 1;
+    return name;
+}
+
+static void update_title(App *app) {
+    char title[256];
+    const NacreCore *core = current_core(app);
+    if (!core) {
+        snprintf(title, sizeof(title), "Nacre");
     } else {
-        /* Leave a save that doesn't fit this cartridge alone rather than overwrite it. */
-        fprintf(stderr, "ignoring the save '%s'; it doesn't fit this cartridge\n",
-                app->save_path);
-        SDL_free(app->save_path);
-        app->save_path = NULL;
-    }
-    SDL_free(data);
-}
-
-/* A file with a Game Boy cartridge header runs on the Game Boy core; anything
- * else must be a CHIP-8 program. A failed load keeps the current session. */
-static int load_rom(App *app, const char *path, char *error,
-                    size_t error_capacity) {
-    char *owned_path = SDL_strdup(path);
-    if (!owned_path) {
-        snprintf(error, error_capacity, "not enough memory to remember the ROM path");
-        return 0;
-    }
-    size_t length = 0;
-    uint8_t *bytes = read_file(path, MAX_GB_ROM, &length, error, error_capacity);
-    if (!bytes) {
-        SDL_free(owned_path);
-        return 0;
-    }
-
-    bool gb_rom = gb_rom_looks_valid(bytes, length) != 0;
-    Chip8 candidate;
-    if (gb_rom) {
-        if (!app->gb) {
-            snprintf(error, error_capacity, "the Game Boy core could not start");
-            goto fail;
+        const char *label = core->title ? core->title(current_instance(app)) : NULL;
+        const char *path = nacre_session_path(app->session);
+        if (!label && path) label = file_name(path);
+        if (label) {
+            snprintf(title, sizeof(title), "Nacre - %s (%s, %s, %s)%s", label, core->name,
+                     speed_name[app->speed], palette_name[app->palette],
+                     app->user_paused ? " - paused" : "");
+        } else {
+            snprintf(title, sizeof(title), "Nacre - %s (%s, %s)%s", core->name,
+                     speed_name[app->speed], palette_name[app->palette],
+                     app->user_paused ? " - paused" : "");
         }
-        write_save(app); /* the cartridge being replaced */
-        if (!gb_load_rom(app->gb, bytes, length, error, error_capacity)) goto fail;
-    } else {
-        if (length > MAX_CHIP8_ROM) {
-            snprintf(error, error_capacity,
-                     "'%s' has no Game Boy cartridge header, and a CHIP-8 ROM can be at "
-                     "most %d bytes", path, (int)MAX_CHIP8_ROM);
-            goto fail;
-        }
-        chip8_init(&candidate, app->seed);
-        if (!chip8_load_bytes(&candidate, bytes, length, error, error_capacity)) goto fail;
-        write_save(app);
-        app->machine = candidate;
-        chip8_scheduler_init(&app->scheduler, CHIP8_DEFAULT_CPU_HZ);
     }
-    SDL_free(bytes);
-
-    SDL_free(app->rom_path);
-    app->rom_path = owned_path;
-    SDL_free(app->save_path);
-    app->save_path = NULL;
-    app->is_gb = gb_rom;
-    if (gb_rom && gb_has_battery(app->gb)) {
-        app->save_path = sibling_path(path, ".sav");
-        if (app->save_path) read_save(app);
-    }
-    app->user_paused = false;
-    sync_audio(app);
-    update_title(app);
-    return 1;
-
-fail:
-    SDL_free(bytes);
-    SDL_free(owned_path);
-    return 0;
-}
-
-/* F2 keeps the Game Boy cartridge (and its save RAM) and resets the machine. */
-static int restart(App *app, char *error, size_t error_capacity) {
-    if (app->is_gb) {
-        write_save(app);
-        gb_reset(app->gb);
-        gb_audio_clear(app->gb);
-        app->user_paused = false;
-        sync_audio(app);
-        update_title(app);
-        return 1;
-    }
-    return load_rom(app, app->rom_path, error, error_capacity);
+    SDL_SetWindowTitle(app->window, title);
 }
 
 static void show_error(App *app, const char *message) {
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Nacre", message, app->window);
+}
+
+/* Puts a battery-save note ("Loaded Tetris.sav", "Couldn't write Tetris.sav") on
+ * screen whenever it changes. */
+static void show_save_note(App *app) {
+    const char *note = nacre_session_save_note(app->session);
+    if (!strcmp(note, app->last_save_note)) return;
+    snprintf(app->last_save_note, sizeof(app->last_save_note), "%s", note);
+    if (note[0]) {
+        set_status(app, "%s", note);
+        fprintf(stderr, "%s\n", note);
+    }
+}
+
+/* ---- Opening games --------------------------------------------------------- */
+
+/* Picks the core from the file's first bytes, then hands the session the whole
+ * file, or only its path for cores that read content themselves (disc images).
+ * A failed open keeps the game that was running. */
+static int open_content(App *app, const char *path, char *error, size_t error_capacity) {
+    uint8_t head[NACRE_PROBE_BYTES];
+    SDL_IOStream *file = SDL_IOFromFile(path, "rb");
+    if (!file) {
+        snprintf(error, error_capacity, "cannot open '%s': %s", path, SDL_GetError());
+        return 0;
+    }
+    Sint64 length = SDL_GetIOSize(file);
+    size_t want = length > 0 ? ((uint64_t)length < sizeof(head) ? (size_t)length : sizeof(head)) : 0;
+    size_t got = want ? SDL_ReadIO(file, head, want) : 0;
+    SDL_CloseIO(file);
+    if (length <= 0 || got != want) {
+        snprintf(error, error_capacity, "'%s' is empty or cannot be read", path);
+        return 0;
+    }
+
+    const NacreCore *core = nacre_core_detect(head, got, (size_t)length, path);
+    if (!core) {
+        snprintf(error, error_capacity,
+                 "Nacre doesn't recognize this file as a game for any system it runs.");
+        return 0;
+    }
+    int ok;
+    if (core->flags & NACRE_CORE_NEEDS_PATH) {
+        ok = nacre_session_open(app->session, core, path, NULL, 0, error, error_capacity);
+    } else {
+        uint8_t *data = NULL;
+        size_t size = 0;
+        if (io_read(app, path, MAX_CONTENT, &data, &size) != NACRE_IO_OK) {
+            snprintf(error, error_capacity, "'%s' is too large or cannot be read", path);
+            return 0;
+        }
+        ok = nacre_session_open(app->session, core, path, data, size, error, error_capacity);
+        free(data);
+    }
+    if (!ok) return 0;
+    app->user_paused = false;
+    app->last_save_note[0] = '\0';
+    show_save_note(app);
+    update_title(app);
+    return 1;
+}
+
+/* The welcome program ships beside the binary. It opens as bytes with no path,
+ * so nothing (saves, states) is ever written next to the install. */
+static int open_bundled(App *app, char *error, size_t error_capacity) {
+    const char *base = SDL_GetBasePath();
+    char *path = NULL;
+    uint8_t *data = NULL;
+    size_t size = 0;
+    int ok = 0;
+    if (!base) {
+        snprintf(error, error_capacity, "could not locate the bundled hello.ch8 ROM");
+        return 0;
+    }
+#ifdef __APPLE__
+    SDL_asprintf(&path, "%s../Resources/hello.ch8", base);
+#else
+    SDL_asprintf(&path, "%sassets/hello.ch8", base);
+#endif
+    if (!path || io_read(app, path, 4096, &data, &size) != NACRE_IO_OK) {
+        snprintf(error, error_capacity, "could not read the bundled ROM '%s'", path ? path : "hello.ch8");
+    } else {
+        ok = nacre_session_open(app->session, nacre_core_by_id("chip8"), NULL, data, size, error,
+                                error_capacity);
+    }
+    free(data);
+    SDL_free(path);
+    if (ok) update_title(app);
+    return ok;
 }
 
 static void queue_file_event(App *app, int code, const char *message) {
@@ -392,9 +320,7 @@ static void queue_file_event(App *app, int code, const char *message) {
     }
 }
 
-static void SDLCALL rom_dialog_callback(void *userdata,
-                                        const char * const *filelist,
-                                        int filter) {
+static void SDLCALL rom_dialog_callback(void *userdata, const char *const *filelist, int filter) {
     (void)filter;
     App *app = (App *)userdata;
     if (!filelist) {
@@ -405,24 +331,37 @@ static void SDLCALL rom_dialog_callback(void *userdata,
     SDL_SetAtomicInt(&app->dialog_pending, 0);
 }
 
+/* "Games" lists every core's extensions (plus the loose ones CHIP-8 programs and
+ * colour-compatible cartridges come in), then one filter per system. */
+static void build_filters(void) {
+    const NacreCore *const *cores = nacre_cores();
+    size_t used = 0;
+    rom_filter_count = 1;
+    for (size_t i = 0; cores[i] && rom_filter_count < MAX_FILTERS - 1; i++) {
+        if (!cores[i]->extensions || !cores[i]->extensions[0]) continue;
+        used += (size_t)snprintf(all_extensions + used, sizeof(all_extensions) - used, "%s%s",
+                                 used ? ";" : "", cores[i]->extensions);
+        if (used >= sizeof(all_extensions)) used = sizeof(all_extensions) - 1;
+        rom_filters[rom_filter_count].name = cores[i]->name;
+        rom_filters[rom_filter_count].pattern = cores[i]->extensions;
+        rom_filter_count++;
+    }
+    snprintf(all_extensions + used, sizeof(all_extensions) - used, "%sgbc;rom;bin", used ? ";" : "");
+    rom_filters[0].name = "Games";
+    rom_filters[0].pattern = all_extensions;
+    rom_filters[rom_filter_count].name = "All files";
+    rom_filters[rom_filter_count].pattern = "*";
+    rom_filter_count++;
+}
+
 static void open_rom_dialog(App *app) {
     if (SDL_GetAtomicInt(&app->dialog_pending)) return;
     SDL_SetAtomicInt(&app->dialog_pending, 1);
-    SDL_ShowOpenFileDialog(rom_dialog_callback, app, app->window,
-                           rom_filters, (int)SDL_arraysize(rom_filters),
+    SDL_ShowOpenFileDialog(rom_dialog_callback, app, app->window, rom_filters, rom_filter_count,
                            NULL, false);
 }
 
-/* ---- Game Boy input: states, fast-forward, rebinding ---------------------------- */
-
-/* A short message drawn over the game that clears itself after a few seconds. */
-static void set_status(App *app, const char *format, ...) {
-    va_list args;
-    va_start(args, format);
-    vsnprintf(app->status, sizeof(app->status), format, args);
-    va_end(args);
-    app->status_until = SDL_GetTicksNS() + 3000000000ull;
-}
+/* ---- Input: states, fast-forward, rebinding -------------------------------- */
 
 static void save_prefs(App *app) {
     char text[512];
@@ -435,14 +374,13 @@ static void save_prefs(App *app) {
 }
 
 static void load_prefs(App *app) {
-    char error[128];
+    uint8_t *data = NULL;
     size_t length = 0;
     gbi_set_defaults(&app->keys, default_keys);
     app->slot = 0;
-    if (!app->prefs_path || !SDL_GetPathInfo(app->prefs_path, NULL)) return;
-    uint8_t *data = read_file(app->prefs_path, 4096, &length, error, sizeof(error));
-    if (!data) return;
-    char *text = (char *)SDL_malloc(length + 1);
+    if (!app->prefs_path || io_read(app, app->prefs_path, 4096, &data, &length) != NACRE_IO_OK)
+        return;
+    char *text = (char *)malloc(length + 1);
     if (text) {
         memcpy(text, data, length);
         text[length] = '\0';
@@ -453,77 +391,46 @@ static void load_prefs(App *app) {
         }
         if (newline) {
             const char *slot = strstr(newline + 1, "slot=");
-            if (slot && slot[5] >= '0' && slot[5] < '0' + GB_STATE_SLOTS) app->slot = slot[5] - '0';
+            if (slot && slot[5] >= '0' && slot[5] < '0' + NACRE_STATE_SLOTS) app->slot = slot[5] - '0';
         }
-        SDL_free(text);
+        free(text);
     }
-    SDL_free(data);
+    free(data);
 }
 
-/* "Tetris.gb" keeps its states in "Tetris.state1" .. "Tetris.state4". */
-static char *state_path(const App *app, int slot) {
-    char extension[16];
-    if (!app->rom_path) return NULL;
-    snprintf(extension, sizeof(extension), ".state%d", slot + 1);
-    return sibling_path(app->rom_path, extension);
-}
-
+/* Hands the held buttons to the core (keyboard and controller merged). */
 static void apply_buttons(App *app) {
-    if (!app->gb) return;
-    for (int button = 0; button < GB_BUTTON_COUNT; button++) {
-        bool held = app->kb_held[button] || (app->pad_held & PAD_BIT(button)) != 0;
-        gb_set_button(app->gb, (GbButton)button, held);
-    }
+    const NacreCore *core = current_core(app);
+    if (!core || !core->set_pad) return;
+    core->set_pad(current_instance(app), 0, gbi_pad_buttons(app->kb_held | app->pad_held));
 }
 
 static void save_state(App *app) {
-    if (!app->is_gb || !app->gb) return;
-    char *path = state_path(app, app->slot);
-    size_t size = gb_state_size(app->gb);
-    uint8_t *blob = size ? (uint8_t *)SDL_malloc(size) : NULL;
-    bool ok = false;
-    if (path && blob) {
-        size = gb_state_save(app->gb, blob, size);
-        ok = size > 0 && write_atomic(path, blob, size);
-    }
-    if (ok) set_status(app, "Saved state to slot %d", app->slot + 1);
-    else set_status(app, "Couldn't save to slot %d", app->slot + 1);
-    SDL_free(blob);
-    SDL_free(path);
+    char error[128];
+    if (nacre_session_save_state(app->session, app->slot, error, sizeof(error)))
+        set_status(app, "Saved state to slot %d", app->slot + 1);
+    else
+        set_status(app, "%s", error);
 }
 
 static void load_state(App *app) {
-    if (!app->is_gb || !app->gb) return;
-    char *path = state_path(app, app->slot);
-    if (!path || !SDL_GetPathInfo(path, NULL)) {
-        set_status(app, "Slot %d is empty", app->slot + 1);
-    } else {
-        char error[128];
-        size_t length = 0;
-        uint8_t *blob = read_file(path, MAX_STATE, &length, error, sizeof(error));
-        if (blob && gb_state_load(app->gb, blob, length)) {
-            /* The state remembers the buttons held when it was saved; what is held now wins. */
-            apply_buttons(app);
-            gb_audio_clear(app->gb);
-            set_status(app, "Loaded state from slot %d", app->slot + 1);
-        } else {
-            set_status(app, "Slot %d doesn't fit this game", app->slot + 1);
-        }
-        SDL_free(blob);
-    }
-    SDL_free(path);
+    char error[128];
+    if (nacre_session_load_state(app->session, app->slot, error, sizeof(error)))
+        set_status(app, "Loaded state from slot %d", app->slot + 1);
+    else
+        set_status(app, "%s", error);
 }
 
 static void next_slot(App *app) {
-    app->slot = (app->slot + 1) % GB_STATE_SLOTS;
+    app->slot = (app->slot + 1) % NACRE_STATE_SLOTS;
     save_prefs(app);
     set_status(app, "State slot %d", app->slot + 1);
 }
 
-static void gb_action_press(App *app, int action, bool repeat) {
+static void action_press(App *app, int action, bool repeat) {
     if (action < GBI_BUTTONS) {
         if (!is_paused(app) && !repeat) {
-            app->kb_held[action] = true;
+            app->kb_held |= GBI_BIT(action);
             apply_buttons(app);
         }
     } else if (action == GBI_FAST_FORWARD) {
@@ -535,22 +442,22 @@ static void gb_action_press(App *app, int action, bool repeat) {
     }
 }
 
-static void gb_action_release(App *app, int action) {
+static void action_release(App *app, int action) {
     if (action < GBI_BUTTONS) {
-        app->kb_held[action] = false;
+        app->kb_held &= ~GBI_BIT(action);
         apply_buttons(app);
     } else if (action == GBI_FAST_FORWARD) {
         app->ff_key = false;
     }
 }
 
-/* Reads the controllers: held buttons feed the console, and the state hotkeys fire once
+/* Reads the controllers: held buttons feed the core, and the state hotkeys fire once
  * per press. Only the focused, running window listens, so a game in the background isn't played. */
 static void poll_pad(App *app) {
     unsigned held = pad_poll();
     const char *note = pad_take_message();
-    if (note && app->is_gb) set_status(app, "%s", note);
-    if (!app->is_gb || is_paused(app) || SDL_GetAtomicInt(&app->dialog_pending)) held = 0;
+    if (note) set_status(app, "%s", note);
+    if (!current_core(app) || is_paused(app) || SDL_GetAtomicInt(&app->dialog_pending)) held = 0;
     unsigned fresh = held & ~app->pad_seen;
     app->pad_seen = held;
     app->pad_held = held;
@@ -591,24 +498,29 @@ static void key_name(int key, char *out, size_t capacity) {
     else snprintf(out, capacity, "key %d", key);
 }
 
-static void release_keys(App *app);
+static void release_keys(App *app) {
+    const NacreCore *core = current_core(app);
+    if (core && core->set_keypad) {
+        for (unsigned key = 0; key < core->keypad_keys; key++)
+            core->set_keypad(current_instance(app), key, 0);
+    }
+    app->kb_held = 0;
+    app->ff_key = false;
+    app->pad_held = 0;
+    app->pad_seen = 0;
+    apply_buttons(app);
+}
 
 static void open_controls(App *app) {
-    if (!app->is_gb) {
-        set_status(app, "Controls apply to Game Boy games");
-        return;
-    }
     release_keys(app);
     app->rebinding = true;
     app->capturing = false;
     app->rb_note[0] = '\0';
-    sync_audio(app);
 }
 
 static void close_controls(App *app) {
     app->rebinding = false;
     app->capturing = false;
-    sync_audio(app);
 }
 
 /* Navigation inside the overlay: arrows pick the cell, Enter waits for a key,
@@ -668,7 +580,12 @@ static void handle_controls_key(App *app, SDL_Scancode scancode) {
     }
 }
 
-static int key_for_scancode(SDL_Scancode scancode) {
+/* The 16-key hex keypad on the left of a QWERTY keyboard:
+ *   1 2 3 C      1 2 3 4
+ *   4 5 6 D  <-  Q W E R
+ *   7 8 9 E      A S D F
+ *   A 0 B F      Z X C V */
+static int keypad_key(SDL_Scancode scancode) {
     switch (scancode) {
         case SDL_SCANCODE_X: return 0x0;
         case SDL_SCANCODE_1: return 0x1;
@@ -690,57 +607,40 @@ static int key_for_scancode(SDL_Scancode scancode) {
     }
 }
 
-static void release_keys(App *app) {
-    for (uint8_t key = 0; key < 16; key++) {
-        chip8_set_key(&app->machine, key, 0);
-    }
-    memset(app->kb_held, 0, sizeof(app->kb_held));
-    app->ff_key = false;
-    app->pad_held = 0;
-    app->pad_seen = 0;
-    if (app->gb) {
-        for (int button = 0; button < GB_BUTTON_COUNT; button++) {
-            gb_set_button(app->gb, (GbButton)button, 0);
-        }
-    }
-}
-
 static void handle_file_event(App *app, SDL_Event *event) {
     char *value = (char *)event->user.data1;
     if (event->user.code == FILE_EVENT_OPENED && value) {
         char error[256];
-        if (!load_rom(app, value, error, sizeof(error))) show_error(app, error);
+        if (!open_content(app, value, error, sizeof(error))) show_error(app, error);
     } else if (event->user.code == FILE_EVENT_ERROR && value) {
         show_error(app, value);
     }
     SDL_free(value);
 }
 
-static void handle_key_event(App *app, const SDL_KeyboardEvent *key,
-                             bool pressed) {
+static void handle_key_event(App *app, const SDL_KeyboardEvent *key, bool pressed) {
     SDL_Keymod modifiers = key->mod;
     bool command = (modifiers & (SDL_KMOD_CTRL | SDL_KMOD_GUI)) != 0;
+    const NacreCore *core = current_core(app);
     if (app->rebinding) {
         if (pressed && !key->repeat) handle_controls_key(app, key->scancode);
         return;
     }
-    if (app->is_gb) {
+    int hex = core && core->set_keypad ? keypad_key(key->scancode) : -1;
+    if (hex >= 0 && (unsigned)hex < core->keypad_keys) {
+        if (!key->repeat) core->set_keypad(current_instance(app), (unsigned)hex, pressed);
+    } else if (core) {
         int action = gbi_lookup(&app->keys, (int)key->scancode);
         if (action >= 0) {
             if (!pressed) {
-                gb_action_release(app, action);
+                action_release(app, action);
                 return;
             }
             /* Ctrl/Alt/Super chords stay shortcuts (Alt+Tab must not fast-forward). */
             if (!command && !(modifiers & SDL_KMOD_ALT)) {
-                gb_action_press(app, action, key->repeat);
+                action_press(app, action, key->repeat);
                 return;
             }
-        }
-    } else {
-        int emulated_key = key_for_scancode(key->scancode);
-        if (emulated_key >= 0) {
-            chip8_set_key(&app->machine, (uint8_t)emulated_key, pressed);
         }
     }
     if (!pressed || key->repeat) return;
@@ -752,34 +652,26 @@ static void handle_key_event(App *app, const SDL_KeyboardEvent *key,
         case SDL_SCANCODE_SPACE:
             app->user_paused = !app->user_paused;
             if (app->user_paused) release_keys(app);
-            sync_audio(app);
             update_title(app);
             break;
-        case SDL_SCANCODE_F2: {
-            char error[256];
-            if (!restart(app, error, sizeof(error))) {
-                show_error(app, error);
-            }
+        case SDL_SCANCODE_F2:
+            nacre_session_restart(app->session);
+            app->user_paused = false;
+            update_title(app);
             break;
-        }
         case SDL_SCANCODE_F3:
-            if (app->is_gb) {
-                app->gb_speed = (app->gb_speed + 1) % 3;
-                update_title(app);
-            }
+            app->speed = (app->speed + 1) % 3;
+            update_title(app);
             break;
         case SDL_SCANCODE_F4:
-            if (app->is_gb) {
-                app->gb_palette = (app->gb_palette + 1) % 3;
-                update_title(app);
-            }
+            app->palette = (app->palette + 1) % 3;
+            update_title(app);
             break;
         case SDL_SCANCODE_F10:
             open_controls(app);
             break;
         case SDL_SCANCODE_M:
             app->muted = !app->muted;
-            sync_audio(app);
             break;
         case SDL_SCANCODE_O:
             if (command) open_rom_dialog(app);
@@ -806,11 +698,10 @@ static void handle_event(App *app, SDL_Event *event) {
         case SDL_EVENT_WINDOW_FOCUS_LOST:
             app->focus_paused = true;
             release_keys(app);
-            sync_audio(app);
+            nacre_session_flush(app->session);
             break;
         case SDL_EVENT_WINDOW_FOCUS_GAINED:
             app->focus_paused = false;
-            sync_audio(app);
             break;
         case SDL_EVENT_KEY_DOWN:
             handle_key_event(app, &event->key, true);
@@ -821,7 +712,7 @@ static void handle_event(App *app, SDL_Event *event) {
         case SDL_EVENT_DROP_FILE:
             if (event->drop.data) {
                 char error[256];
-                if (!load_rom(app, event->drop.data, error, sizeof(error))) show_error(app, error);
+                if (!open_content(app, event->drop.data, error, sizeof(error))) show_error(app, error);
             }
             break;
         default:
@@ -829,40 +720,81 @@ static void handle_event(App *app, SDL_Event *event) {
     }
 }
 
-static uint32_t gb_shade(int palette, int shade) {
-    uint32_t light = gb_palette_light[palette], out = 0;
+/* ---- Drawing --------------------------------------------------------------- */
+
+static uint32_t mix(uint32_t a, uint32_t b, unsigned step, unsigned steps) {
+    uint32_t out = 0;
     for (int shift = 0; shift < 24; shift += 8) {
-        int a = (int)((light >> shift) & 0xFF), b = (int)((GB_PALETTE_DARK >> shift) & 0xFF);
-        out |= (uint32_t)(a + (b - a) * shade / 3) << shift;
+        int x = (int)((a >> shift) & 0xFF), y = (int)((b >> shift) & 0xFF);
+        out |= (uint32_t)(x + (y - x) * (int)step / (int)steps) << shift;
     }
     return out;
 }
 
-static int upload_gb_frame(App *app) {
-    static uint8_t pixels[GB_SCREEN_WIDTH * GB_SCREEN_HEIGHT * 4];
-    const uint8_t *shades = gb_framebuffer(app->gb);
-    uint32_t colors[4];
-    for (int i = 0; i < 4; i++) colors[i] = gb_shade(app->gb_palette, i);
-    for (size_t i = 0; i < GB_SCREEN_WIDTH * GB_SCREEN_HEIGHT; i++) {
-        uint32_t color = colors[shades[i] & 3];
-        pixels[i * 4] = (uint8_t)(color >> 16);
-        pixels[i * 4 + 1] = (uint8_t)(color >> 8);
-        pixels[i * 4 + 2] = (uint8_t)color;
-        pixels[i * 4 + 3] = 255;
-    }
-    return SDL_UpdateTexture(app->gb_framebuffer, NULL, pixels, GB_SCREEN_WIDTH * 4);
+/* Shade i of an indexed frame. LCD shades run from the palette's light ink (0) to
+ * the dark green; a two-level display lights its set pixels on the dark screen, as
+ * the Mac and Windows interfaces draw CHIP-8. */
+static uint32_t shade_color(int palette, unsigned shade, unsigned levels) {
+    uint32_t light = palette_light[palette];
+    if (levels <= 2) return shade ? light : PALETTE_DARK;
+    if (shade >= levels) shade = levels - 1;
+    return mix(light, PALETTE_DARK, shade, levels - 1);
 }
 
-static int upload_chip8_frame(App *app) {
-    uint8_t pixels[CHIP8_DISPLAY_WIDTH * CHIP8_DISPLAY_HEIGHT * 4];
-    for (size_t i = 0; i < CHIP8_DISPLAY_WIDTH * CHIP8_DISPLAY_HEIGHT; i++) {
-        uint8_t value = app->machine.display[i] ? 255 : 0;
-        pixels[i * 4] = value;
-        pixels[i * 4 + 1] = value;
-        pixels[i * 4 + 2] = value;
-        pixels[i * 4 + 3] = 255;
+static bool ensure_texture(App *app, unsigned width, unsigned height) {
+    if (app->texture && app->tex_w == width && app->tex_h == height) return true;
+    if (app->texture) SDL_DestroyTexture(app->texture);
+    app->texture = SDL_CreateTexture(app->renderer, SDL_PIXELFORMAT_XRGB8888,
+                                     SDL_TEXTUREACCESS_STREAMING, (int)width, (int)height);
+    app->tex_w = app->tex_h = 0;
+    if (!app->texture) return false;
+    if (!SDL_SetTextureScaleMode(app->texture, SDL_SCALEMODE_NEAREST)) {
+        SDL_DestroyTexture(app->texture);
+        app->texture = NULL;
+        return false;
     }
-    return SDL_UpdateTexture(app->framebuffer, NULL, pixels, CHIP8_DISPLAY_WIDTH * 4);
+    app->tex_w = width;
+    app->tex_h = height;
+    app->shown_owner = NULL; /* force an upload */
+    return true;
+}
+
+/* Uploads the frame when it, the palette, or the game changed. */
+static bool upload_frame(App *app, const NacreVideoFrame *frame) {
+    if (!ensure_texture(app, frame->width, frame->height)) return false;
+    const void *owner = current_instance(app);
+    if (owner == app->shown_owner && frame->frame_count == app->shown_frame &&
+        app->palette == app->shown_palette)
+        return true;
+    bool ok;
+    if (frame->format == NACRE_PIXEL_XRGB8888) {
+        ok = SDL_UpdateTexture(app->texture, NULL, frame->pixels, (int)frame->pitch);
+    } else {
+        size_t count = (size_t)frame->width * frame->height;
+        if (count > app->pixels_cap) {
+            uint32_t *grown = (uint32_t *)realloc(app->pixels, count * sizeof(uint32_t));
+            if (!grown) return false;
+            app->pixels = grown;
+            app->pixels_cap = count;
+        }
+        uint32_t colors[256];
+        unsigned levels = frame->levels ? frame->levels : 2;
+        if (levels > 256) levels = 256;
+        for (unsigned i = 0; i < 256; i++) colors[i] = shade_color(app->palette, i < levels ? i : levels - 1, levels);
+        const uint8_t *rows = (const uint8_t *)frame->pixels;
+        for (unsigned y = 0; y < frame->height; y++) {
+            const uint8_t *row = rows + y * frame->pitch;
+            uint32_t *out = app->pixels + (size_t)y * frame->width;
+            for (unsigned x = 0; x < frame->width; x++) out[x] = colors[row[x]];
+        }
+        ok = SDL_UpdateTexture(app->texture, NULL, app->pixels, (int)(frame->width * 4));
+    }
+    if (ok) {
+        app->shown_owner = owner;
+        app->shown_frame = frame->frame_count;
+        app->shown_palette = app->palette;
+    }
+    return ok;
 }
 
 /* Debug text is an 8x8 bitmap font; scale it to the window so it stays readable. */
@@ -912,7 +844,7 @@ static void draw_controls(App *app, int width, int height) {
     SDL_SetRenderScale(app->renderer, scale, scale);
 
     float x = 12.0f, y = 8.0f;
-    draw_text(app, x, y, "GAME BOY CONTROLS", 0xEB, 0xD8, 0xAF);
+    draw_text(app, x, y, "CONTROLS", 0xEB, 0xD8, 0xAF);
     y += 14.0f;
     draw_text(app, x, y, "Up/Down row  Left/Right key  Enter rebind", 0x9A, 0xB0, 0xA2);
     y += 10.0f;
@@ -940,34 +872,36 @@ static void draw_controls(App *app, int width, int height) {
     draw_text(app, x, y, "Pad: D-pad/stick, B/A buttons, R shoulder = fast", 0x9A, 0xB0, 0xA2);
     y += 10.0f;
     draw_text(app, x, y, "L shoulder + Start/Back/Y = save/load/slot", 0x9A, 0xB0, 0xA2);
+    y += 10.0f;
+    draw_text(app, x, y, "CHIP-8 keypad: 1234 QWER ASDF ZXCV", 0x9A, 0xB0, 0xA2);
     SDL_SetRenderScale(app->renderer, 1.0f, 1.0f);
 }
 
 static int render_frame(App *app) {
-    SDL_Texture *texture = app->is_gb ? app->gb_framebuffer : app->framebuffer;
-    float source_w = app->is_gb ? (float)GB_SCREEN_WIDTH : (float)CHIP8_DISPLAY_WIDTH;
-    float source_h = app->is_gb ? (float)GB_SCREEN_HEIGHT : (float)CHIP8_DISPLAY_HEIGHT;
-    if (!(app->is_gb ? upload_gb_frame(app) : upload_chip8_frame(app))) return 0;
-
+    const NacreCore *core = current_core(app);
+    const NacreVideoFrame *frame = core && core->video ? core->video(current_instance(app)) : NULL;
     int width, height;
     if (!SDL_GetRenderOutputSize(app->renderer, &width, &height)) return 0;
-    float scale_x = (float)width / source_w;
-    float scale_y = (float)height / source_h;
-    float scale = scale_x < scale_y ? scale_x : scale_y;
-    /* Whole-number scaling keeps Game Boy pixels even when there is room for it. */
-    if (app->is_gb && scale >= 1.0f) scale = SDL_floorf(scale);
-    SDL_FRect destination = {
-        ((float)width - source_w * scale) / 2.0f,
-        ((float)height - source_h * scale) / 2.0f,
-        source_w * scale,
-        source_h * scale
-    };
 
-    if (app->is_gb) SDL_SetRenderDrawColor(app->renderer, 0x18, 0x21, 0x1E, 255);
-    else SDL_SetRenderDrawColor(app->renderer, 0, 0, 0, 255);
-    if (!SDL_RenderClear(app->renderer) ||
-        !SDL_RenderTexture(app->renderer, texture, NULL, &destination)) {
-        return 0;
+    SDL_SetRenderDrawColor(app->renderer, (SCREEN_BACKGROUND >> 16) & 0xFF,
+                           (SCREEN_BACKGROUND >> 8) & 0xFF, SCREEN_BACKGROUND & 0xFF, 255);
+    if (!SDL_RenderClear(app->renderer)) return 0;
+    if (frame && frame->width && frame->height && frame->pixels) {
+        if (!upload_frame(app, frame)) return 0;
+        float source_w = frame->aspect > 0.0f ? (float)frame->height * frame->aspect : (float)frame->width;
+        float source_h = (float)frame->height;
+        float scale_x = (float)width / source_w;
+        float scale_y = (float)height / source_h;
+        float scale = scale_x < scale_y ? scale_x : scale_y;
+        /* Whole-number scaling keeps square pixels even when there is room for it. */
+        if (frame->aspect <= 0.0f && scale >= 1.0f) scale = SDL_floorf(scale);
+        SDL_FRect destination = {
+            ((float)width - source_w * scale) / 2.0f,
+            ((float)height - source_h * scale) / 2.0f,
+            source_w * scale,
+            source_h * scale
+        };
+        if (!SDL_RenderTexture(app->renderer, app->texture, NULL, &destination)) return 0;
     }
     if (app->rebinding) draw_controls(app, width, height);
     else draw_hud(app, width, height);
@@ -975,27 +909,7 @@ static int render_frame(App *app) {
     return 1;
 }
 
-static char *default_rom_path(void) {
-    const char *base = SDL_GetBasePath();
-    if (!base) return NULL;
-    char *path = NULL;
-#ifdef __APPLE__
-    SDL_asprintf(&path, "%s../Resources/hello.ch8", base);
-#else
-    SDL_asprintf(&path, "%sassets/hello.ch8", base);
-#endif
-    return path;
-}
-
-static SDL_Texture *make_texture(App *app, int width, int height) {
-    SDL_Texture *texture = SDL_CreateTexture(app->renderer, SDL_PIXELFORMAT_RGBA32,
-                                             SDL_TEXTUREACCESS_STREAMING, width, height);
-    if (texture && !SDL_SetTextureScaleMode(texture, SDL_SCALEMODE_NEAREST)) {
-        SDL_DestroyTexture(texture);
-        return NULL;
-    }
-    return texture;
-}
+/* ---- Start, run, stop ------------------------------------------------------ */
 
 static int initialize(App *app, const char *rom_path) {
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_EVENTS)) {
@@ -1004,6 +918,7 @@ static int initialize(App *app, const char *rom_path) {
     }
     app->sdl_initialized = true;
     pad_init();
+    build_filters();
     {
         char *dir = SDL_GetPrefPath("tdotlab", "Nacre");
         if (dir) {
@@ -1014,8 +929,7 @@ static int initialize(App *app, const char *rom_path) {
     }
 
     app->window = SDL_CreateWindow("Nacre", WINDOW_WIDTH, WINDOW_HEIGHT,
-                                    SDL_WINDOW_RESIZABLE |
-                                    SDL_WINDOW_HIGH_PIXEL_DENSITY);
+                                   SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
     if (!app->window) {
         fprintf(stderr, "could not create the Nacre window: %s\n", SDL_GetError());
         return 0;
@@ -1025,96 +939,61 @@ static int initialize(App *app, const char *rom_path) {
         fprintf(stderr, "could not create the Nacre renderer: %s\n", SDL_GetError());
         return 0;
     }
-    app->framebuffer = make_texture(app, CHIP8_DISPLAY_WIDTH, CHIP8_DISPLAY_HEIGHT);
-    app->gb_framebuffer = make_texture(app, GB_SCREEN_WIDTH, GB_SCREEN_HEIGHT);
-    if (!app->framebuffer || !app->gb_framebuffer) {
-        fprintf(stderr, "could not create the framebuffer textures: %s\n", SDL_GetError());
-        return 0;
-    }
-
     app->rom_event_type = SDL_RegisterEvents(1);
     if (app->rom_event_type == (Uint32)-1) {
         fprintf(stderr, "could not register the ROM event: %s\n", SDL_GetError());
         return 0;
     }
 
-    app->seed = 0x4E414352u;
-    app->gb_speed = 1;
-    app->gb = gb_create();
-    if (!app->gb) fprintf(stderr, "the Game Boy core could not start\n");
-
-    /* The Game Boy pushes stereo samples itself; its stream stays paused until a
-     * cartridge runs. Open it before loading so a cartridge starts with sound. */
-    SDL_AudioSpec gb_spec;
-    SDL_zero(gb_spec);
-    gb_spec.format = SDL_AUDIO_S16;
-    gb_spec.channels = 2;
-    gb_spec.freq = (int)GB_AUDIO_SAMPLE_RATE;
-    app->gb_stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,
-                                               &gb_spec, NULL, NULL);
-
-    if (rom_path) {
-        char error[256];
-        if (!load_rom(app, rom_path, error, sizeof(error))) {
-            show_error(app, error);
-            return 0;
-        }
-    } else {
-        char *bundled_rom = default_rom_path();
-        char error[256];
-        if (!bundled_rom) {
-            snprintf(error, sizeof(error), "could not locate the bundled hello.ch8 ROM");
-            show_error(app, error);
-            return 0;
-        }
-        if (!load_rom(app, bundled_rom, error, sizeof(error))) {
-            SDL_free(bundled_rom);
-            show_error(app, error);
-            return 0;
-        }
-        SDL_free(bundled_rom);
+    NacreSessionIo io = { io_read, io_write, io_now, app };
+    NacreHost host = { NULL, NULL, host_log, NULL, app };
+    app->session = nacre_session_create(&io, &host, 1);
+    app->audio = audio_out_create();
+    if (!app->session || !app->audio) {
+        fprintf(stderr, "not enough memory to start\n");
+        return 0;
     }
+    app->speed = 1;
+    app->applied_running = -1;
 
-    chip8_audio_oscillator_reset(&app->audio.oscillator);
-    SDL_AudioSpec audio_spec;
-    SDL_zero(audio_spec);
-    audio_spec.format = SDL_AUDIO_S16;
-    audio_spec.channels = 1;
-    audio_spec.freq = CHIP8_AUDIO_SAMPLE_RATE;
-    app->audio.stream = SDL_OpenAudioDeviceStream(
-        SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &audio_spec,
-        audio_callback, &app->audio);
-    if (app->audio.stream && SDL_ResumeAudioStreamDevice(app->audio.stream)) {
-        app->audio_available = true;
-    } else {
-        fprintf(stderr, "audio is unavailable; continuing silently: %s\n",
-                SDL_GetError());
+    char error[256];
+    if (!(rom_path ? open_content(app, rom_path, error, sizeof(error))
+                   : open_bundled(app, error, sizeof(error)))) {
+        show_error(app, error);
+        return 0;
     }
-    sync_audio(app);
-
     return 1;
 }
 
 static void cleanup(App *app) {
-    write_save(app);
-    SDL_SetAtomicInt(&app->audio.active, 0);
-    if (app->audio.stream) SDL_DestroyAudioStream(app->audio.stream);
-    if (app->gb_stream) SDL_DestroyAudioStream(app->gb_stream);
-    if (app->framebuffer) SDL_DestroyTexture(app->framebuffer);
-    if (app->gb_framebuffer) SDL_DestroyTexture(app->gb_framebuffer);
+    nacre_session_destroy(app->session); /* writes a pending battery save */
+    audio_out_destroy(app->audio);
+    if (app->texture) SDL_DestroyTexture(app->texture);
     if (app->renderer) SDL_DestroyRenderer(app->renderer);
     if (app->window) SDL_DestroyWindow(app->window);
-    gb_destroy(app->gb);
-    SDL_free(app->rom_path);
-    SDL_free(app->save_path);
+    free(app->pixels);
     SDL_free(app->prefs_path);
     pad_shutdown();
     if (app->sdl_initialized) SDL_Quit();
 }
 
+/* Pause and speed reach the session only when they change. */
+static void sync_session(App *app) {
+    int running = !is_paused(app);
+    unsigned percent = app->ff_on ? FAST_PERCENT : speed_percent[app->speed];
+    if (running != app->applied_running) {
+        nacre_session_set_running(app->session, running);
+        app->applied_running = running;
+    }
+    if (percent != app->applied_speed) {
+        nacre_session_set_speed(app->session, percent);
+        app->applied_speed = percent;
+    }
+}
+
 int main(int argc, char **argv) {
     if (argc > 2) {
-        fprintf(stderr, "Usage: Nacre [path/to/rom.ch8 | path/to/cartridge.gb]\n");
+        fprintf(stderr, "Usage: Nacre [path/to/game]\n");
         return 2;
     }
 
@@ -1134,33 +1013,21 @@ int main(int argc, char **argv) {
         uint64_t now = SDL_GetTicksNS();
         uint64_t elapsed = now - previous;
         previous = now;
-        char error[256];
-        if (!app.is_gb) app.ff_on = false;
-        if (app.is_gb) {
-            poll_pad(&app);
-            app.ff_on = (app.ff_key || (app.pad_held & PAD_BIT(GBI_FAST_FORWARD))) && !is_paused(&app);
-            unsigned percent = app.ff_on ? GB_FAST_PERCENT : gb_speed_percent[app.gb_speed];
-            if (!is_paused(&app) &&
-                !gb_advance_ns(app.gb, elapsed, percent, error, sizeof(error))) {
-                show_error(&app, error);
-                app.quit_requested = true;
-            }
-            pump_gb_audio(&app);
-            /* Games write save RAM in bursts; settle for a second before writing. */
-            if (app.save_path && gb_save_dirty(app.gb)) {
-                if (!app.save_due) app.save_due = now + 1000000000u;
-                else if (now >= app.save_due) write_save(&app);
-            }
-        } else if (!chip8_scheduler_advance(&app.machine, &app.scheduler, elapsed,
-                                            is_paused(&app), timer_tick, &app,
-                                            error, sizeof(error))) {
-            show_error(&app, error);
-            app.quit_requested = true;
+        poll_pad(&app);
+        app.ff_on = current_core(&app) && !is_paused(&app) &&
+                    (app.ff_key || (app.pad_held & PAD_BIT(GBI_FAST_FORWARD)));
+        sync_session(&app);
+        if (!nacre_session_tick(app.session, elapsed, now)) {
+            /* The core halts until F2 or another game; the window stays. */
+            const char *fault = nacre_session_error(app.session);
+            show_error(&app, fault ? fault : "The game stopped.");
+            previous = SDL_GetTicksNS(); /* the dialog's time isn't game time */
         }
-        sync_audio(&app);
+        show_save_note(&app);
+        audio_out_pump(app.audio, current_core(&app), current_instance(&app),
+                       speed_percent[app.speed], !app.muted && !is_paused(&app), app.ff_on);
         if (!render_frame(&app)) {
-            fprintf(stderr, "could not render the Nacre framebuffer: %s\n",
-                    SDL_GetError());
+            fprintf(stderr, "could not render the Nacre framebuffer: %s\n", SDL_GetError());
             app.quit_requested = true;
         }
         SDL_Delay(8);

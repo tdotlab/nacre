@@ -37,7 +37,7 @@ tests/test_core: tests/test_core.c src/chip8.c include/chip8.h
 tests/test_demo: tests/test_demo.c src/chip8.c src/scheduler.c include/chip8.h include/scheduler.h assets/roms/nacre.ch8
 	$(CC) -Iinclude $(CFLAGS) -o $@ tests/test_demo.c src/chip8.c src/scheduler.c
 
-tests/test_gb_input: tests/test_gb_input.c src/gb_input.c include/gb_input.h
+tests/test_gb_input: tests/test_gb_input.c src/gb_input.c include/gb_input.h include/nacre_core.h
 	$(CC) -Iinclude $(CFLAGS) -o $@ tests/test_gb_input.c src/gb_input.c
 
 tests/test_gb: tests/test_gb.c $(GB_SOURCES) $(GB_HEADERS)

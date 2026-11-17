@@ -11,6 +11,17 @@ static const char *const names[GBI_COUNT] = {
     "Fast-forward", "Save state", "Load state", "Next slot",
 };
 
+uint32_t gbi_pad_buttons(unsigned held_actions) {
+    static const NacrePadButton pad[GBI_BUTTONS] = {
+        NACRE_PAD_RIGHT, NACRE_PAD_LEFT, NACRE_PAD_UP, NACRE_PAD_DOWN,
+        NACRE_PAD_EAST,  NACRE_PAD_SOUTH, NACRE_PAD_SELECT, NACRE_PAD_START,
+    };
+    uint32_t buttons = 0;
+    for (int action = 0; action < GBI_BUTTONS; action++)
+        if (held_actions & GBI_BIT(action)) buttons |= NACRE_PAD_BIT(pad[action]);
+    return buttons;
+}
+
 const char *gbi_name(GbInput action) {
     return (action >= 0 && action < GBI_COUNT) ? names[action] : "";
 }

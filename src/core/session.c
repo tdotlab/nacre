@@ -258,10 +258,10 @@ int nacre_session_set_option(NacreSession *session, const char *core_id, const c
     if (!slot) {
         if (session->option_count == MAX_OPTIONS) return 0;
         slot = &session->options[session->option_count++];
-        strcpy(slot->core, core_id);
-        strcpy(slot->key, key);
+        memcpy(slot->core, core_id, strlen(core_id) + 1); /* lengths checked above */
+        memcpy(slot->key, key, strlen(key) + 1);
     }
-    strcpy(slot->value, value);
+    memcpy(slot->value, value, strlen(value) + 1);
     return 1;
 }
 

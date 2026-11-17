@@ -6,6 +6,8 @@
  * Win32 scan code, a macOS virtual key code, an SDL scancode); -1 means unbound.
  * Each action holds two keys, so the defaults can offer arrows and WASD at once. */
 
+#include "nacre_core.h"
+
 #include <stddef.h>
 
 typedef enum {
@@ -31,6 +33,13 @@ typedef enum {
 typedef struct {
     int key[GBI_COUNT][GBI_KEYS_PER_ACTION];
 } GbBindings;
+
+/* Bit `1u << action` per held action, as the controller code reports them. */
+#define GBI_BIT(action) (1u << (action))
+
+/* The NACRE_PAD_* bits for the held button actions (GBI_RIGHT .. GBI_START), so the
+ * same bindings drive any core: A is EAST and B is SOUTH, as on a Game Boy. */
+uint32_t gbi_pad_buttons(unsigned held_actions);
 
 /* Label for the rebinding window ("Right", "Fast-forward", ...). */
 const char *gbi_name(GbInput action);

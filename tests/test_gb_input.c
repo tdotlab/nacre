@@ -68,6 +68,15 @@ int main(void) {
     }
     CHECK(memcmp(&copy, &untouched, sizeof copy) == 0, "bindings survive every refused parse");
 
+    CHECK(gbi_pad_buttons(GBI_BIT(GBI_A)) == NACRE_PAD_BIT(NACRE_PAD_EAST) &&
+              gbi_pad_buttons(GBI_BIT(GBI_B)) == NACRE_PAD_BIT(NACRE_PAD_SOUTH),
+          "A is east and B is south on the standard pad");
+    CHECK(gbi_pad_buttons(GBI_BIT(GBI_RIGHT) | GBI_BIT(GBI_START)) ==
+              (NACRE_PAD_BIT(NACRE_PAD_RIGHT) | NACRE_PAD_BIT(NACRE_PAD_START)),
+          "directions and Start carry over");
+    CHECK(gbi_pad_buttons(GBI_BIT(GBI_FAST_FORWARD) | GBI_BIT(GBI_SAVE_STATE)) == 0,
+          "frontend actions are not pad buttons");
+
     if (!failures) printf("ok   gb_input\n");
     return failures ? 1 : 0;
 }
