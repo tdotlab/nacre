@@ -142,8 +142,8 @@ static void attach_save(NacreSession *session) {
         ? session->io.read_file(session->io.userdata, session->save_path, NACRE_MAX_SAVE_BYTES, &data, &size)
         : NACRE_IO_MISSING;
     if (result == NACRE_IO_MISSING) {
-        snprintf(session->save_note, sizeof session->save_note, "Saves to %s",
-                 file_name(session->save_path));
+        snprintf(session->save_note, sizeof session->save_note,
+                 session->persist ? "Saves to %s" : "Not saving %s this run", file_name(session->save_path));
     } else if (result == NACRE_IO_OK && core->save_load(session->self, data, size)) {
         core->save_mark_clean(session->self);
         snprintf(session->save_note, sizeof session->save_note, "Loaded %s",

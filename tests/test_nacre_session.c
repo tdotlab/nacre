@@ -204,6 +204,7 @@ static void save_checks(void) {
     wipe();
     s = session_new(0);
     CHECK(nacre_session_open(s, NULL, "/x/Save Test.gb", gb_rom, sizeof gb_rom, error, sizeof error));
+    CHECK(!strcmp(nacre_session_save_note(s), "Not saving Save Test.sav this run"));
     CHECK(tick_ms(s, 100));
     CHECK(!nacre_session_save_state(s, 0, error, sizeof error));
     nacre_session_destroy(s);

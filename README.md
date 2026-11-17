@@ -179,7 +179,10 @@ save is written about a second after the game changes it, and again on restart,
 on loading another ROM, and on exit. Each write goes to a temporary file first and
 then replaces the old save. A `.sav` that doesn't fit the cartridge is left
 untouched. `Nacre.exe ROM --seconds N --snapshot out.png` runs a cartridge for N
-seconds and captures the window.
+seconds and captures the window; a snapshot run never writes saves or states.
+Like the Linux frontend, the Windows app runs every game through the
+system-agnostic core interface, so fast-forward and save states also work for
+CHIP-8 programs opened from a file.
 
 The Mac app does the same in its own design: the same keys (`Return` for Start,
 `Delete` or right `Shift` for Select), `.sav` handling and stereo sound, and it

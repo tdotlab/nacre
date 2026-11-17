@@ -24,7 +24,7 @@ audio devices.
 | `tests/test_gb.c`, `tools/get-gb-test-roms.py` | ROM-driven core checks; headless run/dump/press tool |
 | `src/macos/main.m` | ARC-managed AppKit app, native menus/panels, display, controls, SDL3 audio, Game Boy display/keys/`.sav` |
 | `src/macos/Info.plist.in` | Mac identity, version, document associations, OS requirement |
-| `src/windows/main.cpp` | Win32 + GDI+ app: window, owner-drawn controls, menus, dialogs, drop target, registry prefs, SDL3 audio, Game Boy display/keys/`.sav` |
+| `src/windows/main.cpp` | Win32 + GDI+ app: window, owner-drawn controls, menus, dialogs, drop target, registry prefs; runs every registered core through a session, with per-system looks (keypad or pad, speed in Hz or ×) keyed by core id |
 | `src/windows/branding.h` | Shell mark and icon geometry (same shapes as the Mac header), shared by the app and the icon tool |
 | `src/windows/nacre.rc.in`, `nacre.manifest` | Embedded icon and welcome ROM, version info; comctl32 v6, PerMonitorV2 DPI |
 | `tools/windows-icon.cpp` | Build-time generator of `Nacre.ico` (PNG frames, 16–256 px) |
@@ -35,9 +35,12 @@ audio devices.
 
 ## Thread and state ownership
 
-AppKit, the Win32 message loop, and the SDL event loop each run the machine on
-their main thread. The audio callback reads an atomic active flag and owns its
-oscillator. It never reads the machine directly. Mac schedules at 60 Hz using a
+AppKit, the Win32 message loop, and the SDL event loop each run the game on
+their main thread. Windows and Linux hold one `NacreSession` and call
+`nacre_session_tick` each UI tick; `audio_out` pulls the core's samples into one
+SDL3 stream on that same thread. The Mac still drives the CHIP-8 machine and the
+Game Boy directly, and its CHIP-8 audio callback reads an atomic active flag and
+owns its oscillator. Mac schedules at 60 Hz using a
 common-mode NSTimer; Windows uses a 16 ms `SetTimer` with `timeBeginPeriod(1)`.
 Elapsed time comes from SDL's monotonic clock on both. The shared scheduler caps
 catch-up at 250 ms.
@@ -92,12 +95,13 @@ feeds real time to the MBC3 clock, which then catches up when a save is loaded.
 
 `gb_advance_ns` turns wall time into cycles at a speed percentage and carries the
 fractional cycle, so a frontend calls it once per UI tick and stays exact over
-long runs. Each frontend picks the core from the ROM's header
-(`gb_rom_looks_valid`), not its extension. Each shell keeps both machines alive
-and switches between them. They write `.sav` files a second after the cart goes
-dirty, and on restart, load and exit, through a temporary file and an atomic
-rename (`MoveFileEx` on Windows, `NSDataWritingAtomic` on Mac, `SDL_RenamePath`
-on Linux). The Mac draws the 160×144 frame through a CGBitmapContext image with
+long runs. Cores are picked from the file's contents (`gb_rom_looks_valid`
+behind the registry's probe), not its extension. On Windows and Linux the session
+owns the `.sav`; the Mac shell still keeps both machines alive and switches
+between them. Saves are written a second after the cart goes dirty, and on
+restart, load and exit, through a temporary file and an atomic rename
+(`MoveFileEx` on Windows, `NSDataWritingAtomic` on Mac, `SDL_RenamePath` on
+Linux). The Mac draws the 160×144 frame through a CGBitmapContext image with
 interpolation off, flipped for its top-left view coordinates. Game Boy audio is pushed into its own SDL3 stream: stereo, no
 callback, 48 kHz, resampled for 0.5×/2×. The queue is held between about 40 and
 150 ms, padding with silence when it runs short and dropping a batch when it

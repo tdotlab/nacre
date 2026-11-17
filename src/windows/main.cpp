@@ -1,9 +1,12 @@
-/* Nacre for Windows: a native Win32 shell over the shared C CHIP-8 and Game Boy cores.
+/* Nacre for Windows: a native Win32 shell over the shared cores.
  *
  * It mirrors the Mac interface: pearl sidebar, dark display well, palettes, live
  * keycaps, native menus and file dialogs, drag-and-drop, recent files, and saved
- * preferences. GDI+ draws the custom surface; SDL3 provides only the audio device,
- * exactly as on the Mac. Only the audio callback runs off the UI thread. */
+ * preferences. GDI+ draws the custom surface; SDL3 provides only the audio device
+ * and controllers. Games run through a NacreSession, so this file knows no
+ * emulated system: it draws whatever frame the core hands back, sends keypad or
+ * pad input depending on what the core has, and leaves saves and states to the
+ * session. Everything runs on the UI thread. */
 
 #include "branding.h"
 
@@ -24,11 +27,10 @@
 #include <vector>
 
 extern "C" {
-#include "audio.h"
-#include "chip8.h"
-#include "gb.h"
 #include "gb_input.h"
-#include "scheduler.h"
+#include "nacre_core.h"
+#include "nacre_session.h"
+#include "../desktop/audio_out.h"
 #include "../desktop/pad.h"
 }
 #include <SDL3/SDL.h>
@@ -69,8 +71,7 @@ const UINT WM_NACRE_LOAD = WM_APP + 1;     /* lParam: heap std::wstring* */
 const UINT WM_NACRE_SNAPSHOT = WM_APP + 2; /* run the self-check and capture */
 const UINT_PTR TIMER_TICK = 1;
 const UINT_PTR TIMER_SNAPSHOT = 2;
-const size_t MAX_ROM = CHIP8_MEMORY_SIZE - CHIP8_PROGRAM_START;
-const size_t MAX_GB_ROM = 8u << 20; /* the largest MBC5 cartridge */
+const size_t MAX_CONTENT = 256u << 20; /* larger content must be a NEEDS_PATH core's */
 const int MAX_RECENT = 10;
 
 /* ---- Palette and metrics (matches the Mac view) ------------------------ */
@@ -81,23 +82,33 @@ const unsigned C_BUTTON_DOWN = 0xC9C7BE, C_ACCENT = 0x527A64;
 const unsigned C_WELL = 0x18211E, C_WELL_DROP = 0x294C3D, C_WELL_SHADOW = 0xD7D8CE;
 const unsigned PALETTE_INK[3] = {0xC3DCC7, 0xEBD8AF, 0xE8E9DF};
 const wchar_t *const PALETTE_NAME[3] = {L"Fern", L"Amber", L"Pearl"};
-const uint32_t SPEED_HZ[3] = {300, 600, 1000};
-const wchar_t *const SPEED_NAME[3] = {L"Relaxed · 300 Hz", L"Original · 600 Hz",
+/* Most systems take speed as a share of real time. CHIP-8 has no real time of its
+ * own: its speed is the instruction clock, a core option, and it always runs its
+ * 60 Hz timers at 1x. Each kind keeps its own saved choice. */
+const uint32_t CLOCK_HZ[3] = {300, 600, 1000};
+const wchar_t *const CLOCK_NAME[3] = {L"Relaxed · 300 Hz", L"Original · 600 Hz",
                                       L"Quick · 1000 Hz"};
-const unsigned GB_SPEED_PERCENT[3] = {50, 100, 200};
-const unsigned GB_FAST_PERCENT = 400; /* while the fast-forward key is held */
-const int GB_STATE_SLOTS = 4;
-const wchar_t *const GB_SPEED_NAME[3] = {L"Half · 0.5×", L"Normal · 1×", L"Double · 2×"};
+const unsigned SPEED_PERCENT[3] = {50, 100, 200};
+const wchar_t *const SPEED_NAME[3] = {L"Half · 0.5×", L"Normal · 1×", L"Double · 2×"};
+const unsigned FAST_PERCENT = 400; /* while the fast-forward key is held */
+const int STATE_SLOTS = NACRE_STATE_SLOTS;
+
+/* What the window says about each system it knows by name. Anything else gets the
+ * neutral defaults: real-time speed and no refresh note. */
+struct SystemLook {
+    const char *id;
+    bool clock_speed; /* speed is the "cpu_hz" option */
+    const wchar_t *rate;
+};
+const SystemLook LOOKS_BY_SYSTEM[] = {
+    {"chip8", true, L"60 HZ TIMERS"},
+    {"gb", false, L"59.7 HZ FRAMES"},
+};
+const SystemLook DEFAULT_LOOK = {"", false, L""};
 const float SIDEBAR_W = 222.0f;
 const int CLIENT_W = 1120, CLIENT_H = 730, MIN_W = 920, MIN_H = 730;
 
 /* ---- State ------------------------------------------------------------- */
-
-struct Audio {
-    SDL_AudioStream *stream;
-    SDL_AtomicInt active;
-    Chip8AudioOscillator oscillator;
-};
 
 struct App {
     HINSTANCE instance;
@@ -106,42 +117,32 @@ struct App {
     HACCEL accel;
     HWND hover;
 
-    Chip8 machine;
-    Chip8Scheduler scheduler;
-    Audio audio;
+    NacreSession *session; /* the running game, whatever the system */
+    AudioOut *audio;
+    bool rom_bundled;      /* the welcome program: no path, nothing written */
 
-    /* Game Boy session; `is_gb` says which machine is current. */
-    Gb *gb;
-    bool is_gb;
-    int gb_speed;              /* index into GB_SPEED_PERCENT */
-    bool gb_keys[GB_BUTTON_COUNT], shown_gb_keys[GB_BUTTON_COUNT];
-    bool gb_kb[GB_BUTTON_COUNT]; /* held on the keyboard; gb_keys is keyboard or controller */
+    int speed_choice;                  /* index into SPEED_PERCENT */
+    uint32_t cpu_hz;             /* the clock for clock-speed systems */
+    int applied_running;         /* last values handed to the session; -1 = none */
+    unsigned applied_speed;
     GbBindings keys;             /* keyboard bindings, saved in the registry */
+    unsigned kb_held;            /* actions held on the keyboard (GBI_BIT flags) */
     unsigned pad_held, pad_seen; /* controller actions held now and last tick */
+    uint32_t pad_buttons, shown_pad_buttons; /* NACRE_PAD_BIT flags sent to the core */
+    bool keypad_held[16], shown_keypad[16];
     bool ff_key, ff_on;          /* fast-forward key held; fast-forward running */
     int slot;                    /* save-state slot, 0-based */
     std::wstring status;         /* short-lived footer message */
     uint64_t status_until;
-    uint32_t gb_frame_seen;
-    std::wstring save_path;    /* empty when the cartridge has no battery */
-    std::wstring save_note;
-    uint64_t save_due;         /* when a dirty save should be written (ns) */
-    SDL_AudioStream *gb_stream;
-    bool gb_stream_running;
-    Bitmap *gb_bitmap;
+    std::string shown_save_note;
+    uint32_t frame_seen;
+    Bitmap *frame_bitmap;
+    unsigned bitmap_w, bitmap_h;
 
-    std::vector<uint8_t> rom;
-    std::wstring rom_path;
-    bool rom_bundled;
-    std::string fault;
-
-    bool user_paused, focus_paused, dialog_open, muted, audio_available;
+    bool user_paused, focus_paused, dialog_open, muted;
     bool drop_active, fullscreen, ephemeral, in_tick;
     int palette;
-    uint32_t cpu_hz;
     uint64_t previous;
-    uint8_t shown[CHIP8_DISPLAY_WIDTH * CHIP8_DISPLAY_HEIGHT];
-    uint8_t shown_keys[16];
     std::vector<std::wstring> recents;
 
     float scale; /* device pixels per logical unit (dpi / 96) */
@@ -169,6 +170,31 @@ std::wstring widen(const char *text) {
     std::wstring out((size_t)length - 1, L'\0');
     MultiByteToWideChar(CP_UTF8, 0, text, -1, &out[0], length);
     return out;
+}
+
+std::string narrow(const std::wstring &text) {
+    int length = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, NULL, 0, NULL, NULL);
+    if (length <= 1) return std::string();
+    std::string out((size_t)length - 1, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, &out[0], length, NULL, NULL);
+    return out;
+}
+
+/* Core messages are short phrases ("a CHIP-8 program can be at most 3584 bytes");
+ * a dialog wants a sentence. */
+std::wstring sentence(const char *text) {
+    std::wstring out = widen(text ? text : "");
+    if (out.empty()) return out;
+    if (out[0] >= L'a' && out[0] <= L'z') out[0] = (wchar_t)(out[0] - L'a' + L'A');
+    wchar_t last = out.back();
+    if (last != L'.' && last != L'!' && last != L'?') out += L'.';
+    return out;
+}
+
+std::wstring upper(std::wstring text) {
+    for (wchar_t &c : text)
+        if (c >= L'a' && c <= L'z') c = (wchar_t)(c - L'a' + L'A');
+    return text;
 }
 
 std::wstring file_stem(const std::wstring &path) {
@@ -341,105 +367,95 @@ void note_recent(const std::wstring &path) {
     save_recents();
 }
 
-/* ---- Audio ------------------------------------------------------------- */
+/* ---- The running game -------------------------------------------------- */
 
-void SDLCALL audio_callback(void *userdata, SDL_AudioStream *stream, int additional, int total) {
-    (void)total;
-    Audio *audio = static_cast<Audio *>(userdata);
-    int16_t samples[1024];
-    int left = (additional + 1) / 2;
-    while (left > 0) {
-        int count = left < 1024 ? left : 1024;
-        chip8_audio_render_samples(&audio->oscillator, samples, (size_t)count,
-                                   SDL_GetAtomicInt(&audio->active));
-        if (!SDL_PutAudioStreamData(stream, samples, count * (int)sizeof(int16_t))) return;
-        left -= count;
-    }
+const NacreCore *core() { return g.session ? nacre_session_core(g.session) : NULL; }
+void *core_self() { return g.session ? nacre_session_instance(g.session) : NULL; }
+bool ready() { return core() != NULL; }
+const char *fault() { return g.session ? nacre_session_error(g.session) : NULL; }
+
+const SystemLook &look() {
+    const NacreCore *c = core();
+    if (c)
+        for (const SystemLook &entry : LOOKS_BY_SYSTEM)
+            if (strcmp(entry.id, c->id) == 0) return entry;
+    return DEFAULT_LOOK;
+}
+
+/* The core takes the CHIP-8 style hex keypad. */
+bool has_keypad() {
+    const NacreCore *c = core();
+    return c && c->set_keypad && c->keypad_keys >= 16;
+}
+
+bool has_pad() {
+    const NacreCore *c = core();
+    return c && c->set_pad;
+}
+
+std::wstring content_path() {
+    const char *path = g.session ? nacre_session_path(g.session) : NULL;
+    return path ? widen(path) : std::wstring();
+}
+
+const NacreVideoFrame *current_frame() {
+    const NacreCore *c = core();
+    return c && c->video ? c->video(core_self()) : NULL;
 }
 
 bool paused() {
-    return g.user_paused || g.focus_paused || g.dialog_open || !g.fault.empty();
+    return g.user_paused || g.focus_paused || g.dialog_open || fault() != NULL;
 }
 
-void sync_audio() {
-    SDL_SetAtomicInt(&g.audio.active, !g.is_gb && g.audio_available && !g.muted && !paused() &&
-                                          g.machine.sound_timer > 0);
-    bool gb_run = g.is_gb && g.gb_stream && !g.muted && !paused();
-    if (gb_run != g.gb_stream_running && g.gb_stream) {
-        if (gb_run) {
-            SDL_ClearAudioStream(g.gb_stream);
-            gb_audio_clear(g.gb);
-            SDL_ResumeAudioStreamDevice(g.gb_stream);
-        } else {
-            SDL_PauseAudioStreamDevice(g.gb_stream);
-            SDL_ClearAudioStream(g.gb_stream);
-        }
-        g.gb_stream_running = gb_run;
-    }
+unsigned speed_percent() {
+    if (g.ff_on) return FAST_PERCENT;
+    return look().clock_speed ? 100u : SPEED_PERCENT[g.speed_choice];
 }
 
-/* Moves the samples the Game Boy produced this tick to the device. The emulator
- * runs on the wall clock and the device on its own crystal, so the queue is kept
- * between about 40 and 150 ms: top it up with silence after an underrun and drop
- * a batch when it runs long. Fast and slow speeds resample to keep up. */
-void pump_gb_audio() {
-    static int16_t samples[4096 * 2];
-    if (!g.gb) return;
-    if (!g.gb_stream_running) {
-        gb_audio_clear(g.gb);
-        return;
+/* Hands the run state and speed to the session when they change. */
+void sync_session() {
+    if (!g.session) return;
+    int run = paused() ? 0 : 1;
+    if (run != g.applied_running) {
+        nacre_session_set_running(g.session, run);
+        g.applied_running = run;
     }
-    if (g.ff_on) { /* four times faster is a squeal, not music: run silent and let the queue drain */
-        gb_audio_clear(g.gb);
-        return;
-    }
-    float ratio = GB_SPEED_PERCENT[g.gb_speed] / 100.0f;
-    SDL_SetAudioStreamFrequencyRatio(g.gb_stream, ratio);
-    const int bytes_per_ms = (int)(GB_AUDIO_SAMPLE_RATE / 1000u) * 4;
-    int queued = SDL_GetAudioStreamQueued(g.gb_stream);
-    bool drop = queued > (int)(150 * bytes_per_ms * ratio);
-    if (queued < (int)(20 * bytes_per_ms * ratio)) {
-        static const int16_t silence[480 * 2] = {0};
-        int pad = (int)(40 * bytes_per_ms * ratio) - queued;
-        while (pad > 0) {
-            int chunk = pad < (int)sizeof(silence) ? pad & ~3 : (int)sizeof(silence);
-            if (chunk <= 0) break;
-            SDL_PutAudioStreamData(g.gb_stream, silence, chunk);
-            pad -= chunk;
-        }
-    }
-    size_t frames;
-    while ((frames = gb_audio_read(g.gb, samples, 4096)) > 0) {
-        if (!drop) SDL_PutAudioStreamData(g.gb_stream, samples, (int)(frames * 4));
+    unsigned percent = speed_percent();
+    if (percent != g.applied_speed) {
+        nacre_session_set_speed(g.session, percent);
+        g.applied_speed = percent;
     }
 }
 
-void timer_tick(Chip8 *chip8, void *userdata) {
-    (void)chip8;
-    (void)userdata;
-    sync_audio();
+/* Moves this tick's samples to the device; AudioOut handles rate, drift and pauses. */
+void pump_audio() {
+    audio_out_pump(g.audio, core(), core_self(), speed_percent(), !g.muted && !paused(), g.ff_on);
+}
+
+bool audio_available() { return audio_out_available(g.audio) != 0; }
+
+/* The core sees a button as held when the keyboard or a controller holds it. */
+void apply_buttons() {
+    unsigned actions = g.kb_held | (paused() ? 0u : g.pad_held);
+    uint32_t buttons = gbi_pad_buttons(actions);
+    if (buttons == g.pad_buttons) return;
+    g.pad_buttons = buttons;
+    if (has_pad()) core()->set_pad(core_self(), 0, buttons);
+}
+
+void set_keypad_key(int key, bool held) {
+    if (key < 0 || key >= 16 || g.keypad_held[key] == held) return;
+    g.keypad_held[key] = held;
+    if (has_keypad()) core()->set_keypad(core_self(), (unsigned)key, held ? 1 : 0);
 }
 
 void release_keys() {
-    for (uint8_t key = 0; key < 16; key++) chip8_set_key(&g.machine, key, 0);
-    for (int b = 0; b < GB_BUTTON_COUNT; b++) {
-        g.gb_kb[b] = false;
-        g.gb_keys[b] = false;
-        if (g.gb) gb_set_button(g.gb, (GbButton)b, 0);
-    }
-    g.ff_key = false;
+    for (int key = 0; key < 16; key++) set_keypad_key(key, false);
+    g.kb_held = 0;
     g.pad_held = 0;
-}
-
-/* The console sees a button as held when the keyboard or a controller holds it. */
-void apply_buttons() {
-    for (int b = 0; b < GB_BUTTON_COUNT; b++) {
-        bool held = g.gb_kb[b] || (!paused() && (g.pad_held & PAD_BIT(b)) != 0);
-        if (held != g.gb_keys[b]) {
-            g.gb_keys[b] = held;
-            if (g.gb) gb_set_button(g.gb, (GbButton)b, held ? 1 : 0);
-        }
-    }
+    g.ff_key = false;
+    g.pad_buttons = 0;
+    if (has_pad()) core()->set_pad(core_self(), 0, 0);
 }
 
 /* ---- Geometry ---------------------------------------------------------- */
@@ -514,85 +530,111 @@ void draw_text(Graphics &gfx, const wchar_t *text, float x, float y, float w, fl
 const char *KEY_LABELS = "1234QWERASDFZXCV";
 const int KEY_VALUES[16] = {1, 2, 3, 12, 4, 5, 6, 13, 7, 8, 9, 14, 10, 0, 11, 15};
 
-/* Game Boy shades run from the palette's ink (shade 0, the lightest) down to a
- * deep tone just above the well, so a Game Boy screen reads as the same phosphor
- * as CHIP-8 pixels rather than a green LCD pasted into the window. */
-unsigned gb_shade_rgb(int palette, int shade) {
+/* Multi-shade screens run from the palette's ink (shade 0, the lightest) down to a
+ * deep tone just above the well, so an LCD reads as the same phosphor as CHIP-8
+ * pixels rather than a green screen pasted into the window. */
+unsigned shade_rgb(int palette, unsigned shade, unsigned levels) {
     const unsigned dark = 0x1E2A25;
     unsigned ink = PALETTE_INK[palette], out = 0;
+    unsigned steps = levels > 1 ? levels - 1 : 1;
+    if (shade > steps) shade = steps;
     for (int channel = 0; channel < 3; channel++) {
         int shift = channel * 8;
         int a = (int)((ink >> shift) & 0xFF), b = (int)((dark >> shift) & 0xFF);
-        out |= (unsigned)(a + (b - a) * shade / 3) << shift;
+        out |= (unsigned)(a + (b - a) * (int)shade / (int)steps) << shift;
     }
     return out;
 }
 
-void draw_gb_display(Graphics &gfx, const LRect &well) {
+/* Where the frame goes in device pixels: centered, integer-scaled when the core
+ * has square pixels so every pixel stays crisp, else fitted to its aspect. */
+Rect frame_rect(const LRect &well, const NacreVideoFrame *frame) {
     float s = g.scale;
-    float scale = std::floor(std::min((well.w * s - 48.0f * s) / GB_SCREEN_WIDTH,
-                                      (well.h * s - 64.0f * s) / GB_SCREEN_HEIGHT));
-    if (scale < 1.0f) scale = 1.0f;
-    int w = (int)scale * GB_SCREEN_WIDTH, h = (int)scale * GB_SCREEN_HEIGHT;
+    float room_w = well.w * s - 48.0f * s, room_h = well.h * s - 64.0f * s;
+    int w, h;
+    if (frame->aspect <= 0.0f) {
+        float scale = std::floor(std::min(room_w / frame->width, room_h / frame->height));
+        if (scale < 1.0f) scale = 1.0f;
+        w = (int)scale * (int)frame->width;
+        h = (int)scale * (int)frame->height;
+    } else {
+        float fit_w = std::min(room_w, room_h * frame->aspect);
+        w = std::max((int)fit_w, 1);
+        h = std::max((int)(fit_w / frame->aspect), 1);
+    }
     int ox = (int)std::floor((well.x + well.w / 2.0f) * s - w / 2.0f);
     int oy = (int)std::floor((well.y + well.h / 2.0f) * s - h / 2.0f);
-    if (!g.gb_bitmap) g.gb_bitmap = new Bitmap(GB_SCREEN_WIDTH, GB_SCREEN_HEIGHT, PixelFormat32bppRGB);
-    Bitmap *frame = g.gb_bitmap;
-    const uint8_t *pixels = gb_framebuffer(g.gb);
-    uint32_t colors[4];
-    for (int i = 0; i < 4; i++) colors[i] = 0xFF000000u | gb_shade_rgb(g.palette, i);
-    BitmapData data;
-    Rect all(0, 0, GB_SCREEN_WIDTH, GB_SCREEN_HEIGHT);
-    if (frame->LockBits(&all, ImageLockModeWrite, PixelFormat32bppRGB, &data) == Ok) {
-        for (int y = 0; y < GB_SCREEN_HEIGHT; y++) {
-            uint32_t *row = reinterpret_cast<uint32_t *>(static_cast<uint8_t *>(data.Scan0) + y * data.Stride);
-            for (int x = 0; x < GB_SCREEN_WIDTH; x++) row[x] = colors[pixels[y * GB_SCREEN_WIDTH + x] & 3];
+    return Rect(ox, oy, w, h);
+}
+
+/* Two-level screens: lit pixels in ink straight onto the well, in runs. */
+void draw_lit_pixels(Graphics &gfx, const NacreVideoFrame *frame, const Rect &at) {
+    int px = at.Width / (int)frame->width;
+    if (px < 1) px = 1;
+    SolidBrush ink(nacre::color(PALETTE_INK[g.palette]));
+    const uint8_t *pixels = static_cast<const uint8_t *>(frame->pixels);
+    for (unsigned y = 0; y < frame->height; y++) {
+        const uint8_t *row = pixels + y * frame->pitch;
+        unsigned x = 0;
+        while (x < frame->width) {
+            if (!row[x]) {
+                x++;
+                continue;
+            }
+            unsigned run = x;
+            while (run < frame->width && row[run]) run++;
+            gfx.FillRectangle(&ink, at.X + (int)x * px, at.Y + (int)y * px, (int)(run - x) * px, px);
+            x = run;
         }
-        frame->UnlockBits(&data);
     }
-    GraphicsState state = gfx.Save();
-    gfx.ResetTransform();
+}
+
+/* Anything else goes through a bitmap scaled with nearest-neighbour. */
+void draw_bitmap(Graphics &gfx, const NacreVideoFrame *frame, const Rect &at) {
+    if (!g.frame_bitmap || g.bitmap_w != frame->width || g.bitmap_h != frame->height) {
+        delete g.frame_bitmap;
+        g.frame_bitmap = new Bitmap((INT)frame->width, (INT)frame->height, PixelFormat32bppRGB);
+        g.bitmap_w = frame->width;
+        g.bitmap_h = frame->height;
+    }
+    uint32_t colors[256];
+    if (frame->format == NACRE_PIXEL_INDEX8)
+        for (unsigned i = 0; i < 256; i++) colors[i] = 0xFF000000u | shade_rgb(g.palette, i, frame->levels);
+    BitmapData data;
+    Rect all(0, 0, (INT)frame->width, (INT)frame->height);
+    if (g.frame_bitmap->LockBits(&all, ImageLockModeWrite, PixelFormat32bppRGB, &data) == Ok) {
+        const uint8_t *source = static_cast<const uint8_t *>(frame->pixels);
+        for (unsigned y = 0; y < frame->height; y++) {
+            uint32_t *out = reinterpret_cast<uint32_t *>(static_cast<uint8_t *>(data.Scan0) + y * data.Stride);
+            const uint8_t *row = source + y * frame->pitch;
+            if (frame->format == NACRE_PIXEL_INDEX8) {
+                for (unsigned x = 0; x < frame->width; x++) out[x] = colors[row[x]];
+            } else {
+                const uint32_t *rgb = reinterpret_cast<const uint32_t *>(row);
+                for (unsigned x = 0; x < frame->width; x++) out[x] = 0xFF000000u | rgb[x];
+            }
+        }
+        g.frame_bitmap->UnlockBits(&data);
+    }
     gfx.SetInterpolationMode(InterpolationModeNearestNeighbor);
     gfx.SetPixelOffsetMode(PixelOffsetModeHalf);
-    gfx.SetSmoothingMode(SmoothingModeNone);
-    gfx.DrawImage(frame, Rect(ox, oy, w, h), 0, 0, GB_SCREEN_WIDTH, GB_SCREEN_HEIGHT, UnitPixel);
-    gfx.Restore(state);
-    g.gb_frame_seen = gb_frame_count(g.gb);
+    gfx.DrawImage(g.frame_bitmap, at, 0, 0, (INT)frame->width, (INT)frame->height, UnitPixel);
 }
 
 void draw_display(Graphics &gfx, const LRect &well) {
-    if (g.is_gb) {
-        draw_gb_display(gfx, well);
-        return;
-    }
-    /* Centered integer scaling in device pixels, so every CHIP-8 pixel is crisp. */
-    float s = g.scale;
-    float scale = std::floor(std::min((well.w * s - 48.0f * s) / CHIP8_DISPLAY_WIDTH,
-                                      (well.h * s - 64.0f * s) / CHIP8_DISPLAY_HEIGHT));
-    if (scale < 1.0f) scale = 1.0f;
-    int px = (int)scale;
-    int ox = (int)std::floor((well.x + well.w / 2.0f) * s - CHIP8_DISPLAY_WIDTH * scale / 2.0f);
-    int oy = (int)std::floor((well.y + well.h / 2.0f) * s - CHIP8_DISPLAY_HEIGHT * scale / 2.0f);
+    const NacreVideoFrame *frame = current_frame();
+    if (!frame || !frame->pixels || !frame->width || !frame->height) return;
+    Rect at = frame_rect(well, frame);
     GraphicsState state = gfx.Save();
     gfx.ResetTransform();
     gfx.SetSmoothingMode(SmoothingModeNone);
     gfx.SetPixelOffsetMode(PixelOffsetModeNone);
-    SolidBrush ink(nacre::color(PALETTE_INK[g.palette]));
-    for (int y = 0; y < CHIP8_DISPLAY_HEIGHT; y++) {
-        int x = 0;
-        while (x < CHIP8_DISPLAY_WIDTH) {
-            if (!g.machine.display[y * CHIP8_DISPLAY_WIDTH + x]) {
-                x++;
-                continue;
-            }
-            int run = x;
-            while (run < CHIP8_DISPLAY_WIDTH && g.machine.display[y * CHIP8_DISPLAY_WIDTH + run]) run++;
-            gfx.FillRectangle(&ink, ox + x * px, oy + y * px, (run - x) * px, px);
-            x = run;
-        }
-    }
+    if (frame->format == NACRE_PIXEL_INDEX8 && frame->levels <= 2 && frame->aspect <= 0.0f)
+        draw_lit_pixels(gfx, frame, at);
+    else
+        draw_bitmap(gfx, frame, at);
     gfx.Restore(state);
-    memcpy(g.shown, g.machine.display, sizeof(g.shown));
+    g.frame_seen = frame->frame_count;
 }
 
 void render(Graphics &gfx, const RECT &clip) {
@@ -622,53 +664,72 @@ void render(Graphics &gfx, const RECT &clip) {
         draw_text(gfx, label, x, y + (size < 12 ? 8 : 6), cw, 20, size, MONO, held ? 0xFFFFFF : 0x596259,
                   StringAlignmentCenter);
     };
-    if (g.is_gb) {
-        /* A D-pad cross with A and B beside it, then Select and Start: the Game Boy's
-         * own layout, labelled with the keyboard keys that press them. */
-        struct Cap { int button; float col, row, cols; const wchar_t *label; float size; };
-        static const Cap caps[] = {
-            {GB_BUTTON_UP, 1, 0, 1, L"↑", 15},    {GB_BUTTON_LEFT, 0, 1, 1, L"←", 15},
-            {GB_BUTTON_RIGHT, 2, 1, 1, L"→", 15}, {GB_BUTTON_DOWN, 1, 2, 1, L"↓", 15},
-            {GB_BUTTON_A, 3, 0, 1, L"A", 12},     {GB_BUTTON_B, 3, 1, 1, L"B", 12},
-            {GB_BUTTON_SELECT, 0, 3, 2, L"SELECT", 9}, {GB_BUTTON_START, 2, 3, 2, L"START", 9},
-        };
-        for (const Cap &cap : caps)
-            keycap(26.0f + cap.col * 44, 444.0f + cap.row * 39, cap.cols * 44 - 8, cap.label,
-                   g.gb_keys[cap.button], cap.size);
-        draw_text(gfx, L"Rebind keys: Session ▸ Controls", 26, 610, 190, 18, 10, UI, 0x7F847A);
-        std::wstring fast = g.keys.key[GBI_FAST_FORWARD][0] < 0 && g.keys.key[GBI_FAST_FORWARD][1] < 0
-                                ? std::wstring(L"Fast-forward is unbound")
-                                : L"Hold " + action_key(GBI_FAST_FORWARD) + L" to fast-forward";
-        draw_text(gfx, fast.c_str(), 26, 628, 190, 18, 10, UI, 0x7F847A);
-        std::wstring states = L"Save " + action_key(GBI_SAVE_STATE) + L"  ·  Load " +
-                              action_key(GBI_LOAD_STATE) + L"  ·  Slot " + std::to_wstring(g.slot + 1);
-        draw_text(gfx, states.c_str(), 26, 646, 190, 18, 10, UI, 0x7F847A);
-        draw_text(gfx, L"Space to pause  ·  M to mute", 26, 664, 190, 18, 10, UI, 0x7F847A);
-        draw_text(gfx, L"GAME BOY  /  160 × 144", 26, h - 36, 180, 18, 10, MONO, 0x878C80);
-    } else {
+    const NacreCore *c = core();
+    const char *halted = fault();
+    std::wstring hints = L"Space to pause  ·  M to mute";
+    float hint_y = 610;
+    if (has_keypad()) {
         for (int i = 0; i < 16; i++) {
             wchar_t label[2] = {(wchar_t)KEY_LABELS[i], 0};
             keycap(26.0f + (i % 4) * 44, 444.0f + (i / 4) * 39, 36, label,
-                   g.machine.keys[KEY_VALUES[i]] != 0, 12);
+                   g.keypad_held[KEY_VALUES[i]], 12);
         }
-        draw_text(gfx, L"Space to pause  ·  M to mute", 26, 610, 190, 18, 10, UI, 0x7F847A);
-        draw_text(gfx, L"CHIP-8  /  64 × 32", 26, h - 36, 180, 18, 10, MONO, 0x878C80);
+    } else {
+        /* A D-pad cross with two face buttons beside it, then Select and Start,
+         * labelled the way the system names them. */
+        struct Cap { NacrePadButton button; float col, row, cols; const wchar_t *fallback; float size; };
+        static const Cap caps[] = {
+            {NACRE_PAD_UP, 1, 0, 1, L"↑", 15},    {NACRE_PAD_LEFT, 0, 1, 1, L"←", 15},
+            {NACRE_PAD_RIGHT, 2, 1, 1, L"→", 15}, {NACRE_PAD_DOWN, 1, 2, 1, L"↓", 15},
+            {NACRE_PAD_EAST, 3, 0, 1, L"A", 12},  {NACRE_PAD_SOUTH, 3, 1, 1, L"B", 12},
+            {NACRE_PAD_SELECT, 0, 3, 2, L"SELECT", 9}, {NACRE_PAD_START, 2, 3, 2, L"START", 9},
+        };
+        for (const Cap &cap : caps) {
+            bool arrow = cap.button <= NACRE_PAD_RIGHT;
+            const char *named = c && !arrow ? c->pad_labels[cap.button] : NULL;
+            std::wstring label = named ? upper(widen(named)) : std::wstring(cap.fallback);
+            keycap(26.0f + cap.col * 44, 444.0f + cap.row * 39, cap.cols * 44 - 8, label.c_str(),
+                   (g.pad_buttons & NACRE_PAD_BIT(cap.button)) != 0, cap.size);
+        }
+        draw_text(gfx, L"Rebind keys: Session ▸ Controls", 26, 610, 190, 18, 10, UI, 0x7F847A);
+        hint_y = 628;
+    }
+    if (ready() && nacre_session_has_states(g.session)) {
+        std::wstring fast = g.keys.key[GBI_FAST_FORWARD][0] < 0 && g.keys.key[GBI_FAST_FORWARD][1] < 0
+                                ? std::wstring(L"Fast-forward is unbound")
+                                : L"Hold " + action_key(GBI_FAST_FORWARD) + L" to fast-forward";
+        draw_text(gfx, fast.c_str(), 26, hint_y, 190, 18, 10, UI, 0x7F847A);
+        std::wstring states = L"Save " + action_key(GBI_SAVE_STATE) + L"  ·  Load " +
+                              action_key(GBI_LOAD_STATE) + L"  ·  Slot " + std::to_wstring(g.slot + 1);
+        draw_text(gfx, states.c_str(), 26, hint_y + 18, 190, 18, 10, UI, 0x7F847A);
+        hint_y += 36;
+    }
+    draw_text(gfx, hints.c_str(), 26, hint_y, 190, 18, 10, UI, 0x7F847A);
+    const NacreVideoFrame *frame = current_frame();
+    if (c) {
+        std::wstring system = upper(widen(c->name));
+        if (frame)
+            system += L"  /  " + std::to_wstring(frame->width) + L" × " + std::to_wstring(frame->height);
+        draw_text(gfx, system.c_str(), 26, h - 36, 180, 18, 10, MONO, 0x878C80);
     }
 
+    std::wstring stem = file_stem(content_path());
     std::wstring title = g.rom_bundled ? L"Welcome to Nacre"
-                         : g.rom_path.empty() ? L"Your next little world"
-                                              : file_stem(g.rom_path);
+                         : stem.empty() ? L"Your next little world"
+                                        : stem;
     draw_text(gfx, title.c_str(), 254, 23, std::max(w - 430.0f, 0.0f), 36, 23, SEMIBOLD, C_INK);
-    std::wstring kind = g.rom_bundled ? L"PRESS A KEYPAD KEY TO SAY HELLO" : L"CHIP-8 ROM";
-    if (g.is_gb) {
-        std::wstring cart = widen(gb_title(g.gb));
-        kind = cart.empty() ? L"GAME BOY ROM" : L"GAME BOY  ·  " + cart;
+    std::wstring kind;
+    if (g.rom_bundled) {
+        kind = L"PRESS A KEYPAD KEY TO SAY HELLO";
+    } else if (c) {
+        const char *named = c->title ? c->title(core_self()) : NULL;
+        kind = upper(widen(c->name)) + (named ? L"  ·  " + widen(named) : std::wstring(L" ROM"));
     }
     draw_text(gfx, kind.c_str(), 255, 63, std::max(w - 400.0f, 0.0f), 18, 10, MONO, 0x7B8479);
     bool is_paused = paused();
     nacre::fill_round(gfx, w - 133, 42, 6, 6, 3,
-                      !g.fault.empty() ? 0xB66C52 : is_paused ? 0xB09361 : 0x608C70);
-    draw_text(gfx, !g.fault.empty() ? L"STOPPED" : is_paused ? L"PAUSED" : L"RUNNING", w - 118, 37,
+                      halted ? 0xB66C52 : is_paused ? 0xB09361 : 0x608C70);
+    draw_text(gfx, halted ? L"STOPPED" : is_paused ? L"PAUSED" : L"RUNNING", w - 118, 37,
               90, 20, 10, MONO, 0x6C786C);
 
     LRect well = well_rect();
@@ -676,10 +737,10 @@ void render(Graphics &gfx, const RECT &clip) {
     nacre::fill_round(gfx, well.x, well.y, well.w, well.h, 14, g.drop_active ? C_WELL_DROP : C_WELL);
     draw_display(gfx, well);
     draw_text(gfx, L"NACRE", well.x + 18, well.y + well.h - 24, 100, 14, 8, MONO, 0x64776B);
-    if (is_paused || g.drop_active || !g.fault.empty()) {
+    if (is_paused || g.drop_active) {
         const wchar_t *badge = g.drop_active ? L"Drop to open ROM"
-                               : !g.fault.empty() ? L"Execution stopped"
-                                                  : L"Paused";
+                               : halted ? L"Execution stopped"
+                                        : L"Paused";
         float bx = well.x + well.w / 2.0f - 92.0f, by = well.y + 18.0f;
         nacre::fill_round(gfx, bx, by, 184, 30, 15, 0x35483C);
         draw_text(gfx, badge, bx, by + 6, 184, 20, 12, UI, 0xDCE8DA, StringAlignmentCenter);
@@ -689,16 +750,14 @@ void render(Graphics &gfx, const RECT &clip) {
         nacre::fill_round(gfx, bx, by, 94, 30, 15, 0x35483C);
         draw_text(gfx, L"FAST  4×", bx, by + 6, 94, 20, 12, UI, 0xDCE8DA, StringAlignmentCenter);
     }
-    std::wstring note = !g.fault.empty()     ? widen(g.fault.c_str())
-                        : g.is_gb && !g.status.empty() ? g.status
-                        : !g.audio_available || (g.is_gb && !g.gb_stream)
-                            ? std::wstring(L"Audio unavailable")
-                        : g.is_gb            ? g.save_note
-                                             : std::wstring();
+    std::wstring note = halted                ? sentence(halted)
+                        : !g.status.empty()   ? g.status
+                        : c && !audio_available() ? std::wstring(L"Audio unavailable")
+                        : g.session           ? widen(nacre_session_save_note(g.session))
+                                              : std::wstring();
     if (!note.empty())
         draw_text(gfx, note.c_str(), 254, h - 34, std::max(w - 450.0f, 0.0f), 18, 10, UI, 0x7A8276);
-    draw_text(gfx, g.is_gb ? L"59.7 HZ FRAMES" : L"60 HZ TIMERS", w - 146, h - 34, 120, 18, 9, MONO,
-              0x87907F, StringAlignmentFar);
+    draw_text(gfx, look().rate, w - 146, h - 34, 120, 18, 9, MONO, 0x87907F, StringAlignmentFar);
 }
 
 void ensure_back_buffer(int w, int h) {
@@ -872,27 +931,27 @@ void layout() {
     place(g.sound, w - 164, h - 88, 132, 34);
 }
 
-/* Each machine keeps its own speed choice; the speed control shows the current one. */
+/* Each kind of speed keeps its own choice; the speed control shows the current one. */
 int speed_index() {
-    if (g.is_gb) return g.gb_speed;
+    if (!look().clock_speed) return g.speed_choice;
     for (int i = 0; i < 3; i++)
-        if (SPEED_HZ[i] == g.cpu_hz) return i;
+        if (CLOCK_HZ[i] == g.cpu_hz) return i;
     return 1;
 }
 
-const wchar_t *const *speed_names() { return g.is_gb ? GB_SPEED_NAME : SPEED_NAME; }
+const wchar_t *const *speed_names() { return look().clock_speed ? CLOCK_NAME : SPEED_NAME; }
 
 void update_controls() {
-    bool ready = !g.rom.empty();
+    bool loaded = ready();
     SetWindowTextW(g.open, L"Open ROM…");
     SetWindowTextW(g.restart, L"Restart");
     InvalidateRect(g.open, NULL, FALSE);
     InvalidateRect(g.restart, NULL, FALSE);
     SetWindowTextW(g.pause, g.user_paused ? L"Resume" : L"Pause");
-    EnableWindow(g.pause, ready && g.fault.empty());
-    EnableWindow(g.restart, ready);
+    EnableWindow(g.pause, loaded && !fault());
+    EnableWindow(g.restart, loaded);
     SetWindowTextW(g.sound, g.muted ? L"Sound off" : L"Sound on");
-    EnableWindow(g.sound, g.audio_available);
+    EnableWindow(g.sound, audio_available());
     SetWindowTextW(g.speed, speed_names()[speed_index()]);
     InvalidateRect(g.speed, NULL, FALSE);
     SetWindowTextW(g.palette_button, PALETTE_NAME[g.palette]);
@@ -907,13 +966,12 @@ void show_alert(const std::wstring &message) {
     bool was_open = g.dialog_open;
     g.dialog_open = true;
     release_keys();
-    sync_audio();
+    pump_audio();
     TaskDialog(g.hwnd, NULL, L"Nacre", L"This ROM couldn't run", message.c_str(), TDCBF_OK_BUTTON,
                TD_WARNING_ICON, NULL);
     g.dialog_open = was_open;
     g.previous = SDL_GetTicksNS();
     SetFocus(g.hwnd);
-    sync_audio();
     update_controls();
 }
 
@@ -922,12 +980,44 @@ bool pick_rom_path(std::wstring &out) {
     if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER,
                                 IID_PPV_ARGS(&dialog))))
         return false;
-    COMDLG_FILTERSPEC filters[] = {
-        {L"Game ROMs (*.ch8, *.gb, *.gbc, *.rom, *.bin)", L"*.ch8;*.gb;*.gbc;*.rom;*.bin"},
-        {L"CHIP-8 ROMs (*.ch8, *.rom, *.bin)", L"*.ch8;*.rom;*.bin"},
-        {L"Game Boy ROMs (*.gb, *.gbc)", L"*.gb;*.gbc"},
-        {L"All files", L"*.*"}};
-    dialog->SetFileTypes(4, filters);
+    /* "Games" with every extension any core claims (plus the loose ones CHIP-8 and
+     * Game Boy dumps travel under), one entry per core, then everything. */
+    std::vector<std::wstring> names, specs;
+    auto spec_for = [](const std::string &extensions) {
+        std::wstring spec;
+        size_t start = 0;
+        while (start <= extensions.size()) {
+            size_t end = extensions.find(';', start);
+            if (end == std::string::npos) end = extensions.size();
+            std::wstring one = L"*." + widen(extensions.substr(start, end - start).c_str());
+            if (end > start && (L";" + spec + L";").find(L";" + one + L";") == std::wstring::npos) {
+                if (!spec.empty()) spec += L';';
+                spec += one;
+            }
+            start = end + 1;
+        }
+        return spec;
+    };
+    std::string every;
+    for (const NacreCore *const *entry = nacre_cores(); *entry; entry++) {
+        if (!every.empty()) every += ';';
+        every += (*entry)->extensions;
+    }
+    names.push_back(L"Games");
+    specs.push_back(spec_for(every + ";gbc;rom;bin"));
+    for (const NacreCore *const *entry = nacre_cores(); *entry; entry++) {
+        names.push_back(widen((*entry)->name) + L" games");
+        specs.push_back(spec_for((*entry)->extensions));
+    }
+    names.push_back(L"All files");
+    specs.push_back(L"*.*");
+    std::vector<COMDLG_FILTERSPEC> filters;
+    for (size_t i = 0; i < names.size(); i++) {
+        names[i] += L" (" + specs[i] + L")";
+        if (i + 1 == names.size()) names[i] = L"All files";
+    }
+    for (size_t i = 0; i < names.size(); i++) filters.push_back({names[i].c_str(), specs[i].c_str()});
+    dialog->SetFileTypes((UINT)filters.size(), filters.data());
     dialog->SetFileTypeIndex(1);
     dialog->SetTitle(L"Open a ROM");
     dialog->SetOkButtonLabel(L"Open ROM");
@@ -951,55 +1041,31 @@ bool pick_rom_path(std::wstring &out) {
     return picked;
 }
 
-/* ---- ROM loading ------------------------------------------------------- */
+/* ---- Files ------------------------------------------------------------- */
 
-/* Reads a whole file of 1..limit bytes. Returns 0 on success, -1 if it is empty or
- * too large, or the Windows error code. */
-DWORD read_bytes(const std::wstring &path, size_t limit, std::vector<uint8_t> &bytes) {
+/* Reads 1..limit bytes from the start of a file (all of it when `whole`). Returns 0
+ * on success, -1 if it is empty or (when `whole`) too large, or the Windows error
+ * code. `total` gets the file's size. */
+DWORD read_bytes(const std::wstring &path, size_t limit, std::vector<uint8_t> &bytes, bool whole = true,
+                 uint64_t *total = NULL) {
     HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
                               FILE_ATTRIBUTE_NORMAL, NULL);
     if (file == INVALID_HANDLE_VALUE) return GetLastError() ? GetLastError() : (DWORD)-2;
     LARGE_INTEGER size = {};
-    if (!GetFileSizeEx(file, &size) || size.QuadPart <= 0 || (unsigned long long)size.QuadPart > limit) {
+    if (!GetFileSizeEx(file, &size) || size.QuadPart <= 0 ||
+        (whole && (unsigned long long)size.QuadPart > limit)) {
         CloseHandle(file);
         return (DWORD)-1;
     }
-    bytes.resize((size_t)size.QuadPart);
+    if (total) *total = (uint64_t)size.QuadPart;
+    size_t want = (unsigned long long)size.QuadPart < limit ? (size_t)size.QuadPart : limit;
+    bytes.resize(want);
     DWORD read = 0;
-    bool ok = ReadFile(file, bytes.data(), (DWORD)bytes.size(), &read, NULL) != 0 && read == bytes.size();
+    bool ok = ReadFile(file, bytes.data(), (DWORD)want, &read, NULL) != 0 && read == want;
     DWORD code = ok ? 0 : (GetLastError() ? GetLastError() : (DWORD)-2);
     CloseHandle(file);
     return code;
 }
-
-bool read_file(const std::wstring &path, std::vector<uint8_t> &bytes, std::string &error) {
-    DWORD code = read_bytes(path, MAX_GB_ROM, bytes);
-    if (code == 0) return true;
-    char message[256];
-    if (code == (DWORD)-1)
-        snprintf(message, sizeof(message),
-                 "Choose a non-empty CHIP-8 or Game Boy ROM no larger than 8 MB. Your current "
-                 "session has been kept.");
-    else
-        snprintf(message, sizeof(message),
-                 "Nacre couldn't read that file (Windows error %lu). Your current session has "
-                 "been kept.",
-                 (unsigned long)code);
-    error = message;
-    return false;
-}
-
-/* ---- Game Boy battery saves -------------------------------------------- */
-
-/* "Tetris.gb" -> "Tetris", so saves and states sit beside the ROM, as most emulators do. */
-std::wstring path_stem(const std::wstring &rom_path) {
-    size_t slash = rom_path.find_last_of(L"\\/");
-    size_t dot = rom_path.find_last_of(L'.');
-    if (dot == std::wstring::npos || (slash != std::wstring::npos && dot < slash)) return rom_path;
-    return rom_path.substr(0, dot);
-}
-
-std::wstring save_path_for(const std::wstring &rom_path) { return path_stem(rom_path) + L".sav"; }
 
 /* Writes to a temporary file first, then swaps it into place, so a crash mid-write
  * never leaves a torn file. */
@@ -1020,24 +1086,37 @@ bool write_atomic(const std::wstring &path, const uint8_t *data, size_t size) {
     return ok;
 }
 
-/* Writes the cartridge RAM when it has changed: to a temporary file first, then
- * swapped into place, so a crash mid-write never leaves a torn save. */
-void write_save() {
-    g.save_due = 0;
-    if (!g.gb || !g.is_gb || g.save_path.empty() || g.ephemeral || !gb_save_dirty(g.gb)) return;
-    gb_set_wall_clock(g.gb, (int64_t)time(NULL));
-    std::vector<uint8_t> data(gb_save_size(g.gb));
-    size_t size = data.empty() ? 0 : gb_save_write(g.gb, data.data(), data.size());
-    if (size > 0 && write_atomic(g.save_path, data.data(), size)) {
-        gb_save_mark_clean(g.gb);
-        g.save_note = L"Saved to " + file_name(g.save_path);
-    } else {
-        g.save_note = L"Couldn't write " + file_name(g.save_path);
-    }
-    invalidate_footer();
+/* The session's file access: UTF-8 paths in, wide Windows calls underneath. */
+NacreIoResult io_read(void *userdata, const char *path, size_t max_size, uint8_t **data, size_t *size) {
+    (void)userdata;
+    std::vector<uint8_t> bytes;
+    DWORD code = read_bytes(widen(path), max_size, bytes);
+    if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND) return NACRE_IO_MISSING;
+    if (code != 0) return NACRE_IO_FAILED;
+    *data = static_cast<uint8_t *>(malloc(bytes.size()));
+    if (!*data) return NACRE_IO_FAILED;
+    memcpy(*data, bytes.data(), bytes.size());
+    *size = bytes.size();
+    return NACRE_IO_OK;
 }
 
-/* ---- Game Boy save states ---------------------------------------------- */
+int io_write(void *userdata, const char *path, const uint8_t *data, size_t size) {
+    (void)userdata;
+    return write_atomic(widen(path), data, size) ? 1 : 0;
+}
+
+int64_t io_now(void *userdata) {
+    (void)userdata;
+    return (int64_t)time(NULL);
+}
+
+void host_log(void *userdata, NacreLogLevel level, const char *message) {
+    (void)userdata;
+    (void)level;
+    OutputDebugStringW((L"Nacre: " + widen(message) + L"\n").c_str());
+}
+
+/* ---- Save states ------------------------------------------------------- */
 
 /* A short message in the footer that clears itself after a few seconds. */
 void set_status(const std::wstring &text) {
@@ -1046,21 +1125,15 @@ void set_status(const std::wstring &text) {
     invalidate_footer();
 }
 
-/* "Tetris.gb" keeps its states in "Tetris.state1" .. "Tetris.state4". The built-in demo
- * and anything opened without a path has nowhere to put them. */
-std::wstring state_path(int slot) {
-    if (g.rom_path.empty() || g.rom_bundled) return std::wstring();
-    return path_stem(g.rom_path) + L".state" + std::to_wstring(slot + 1);
-}
-
 /* "Slot 2  ·  2026-11-15 14:22", or "Slot 2  ·  empty", for the menu. */
 std::wstring slot_label(int slot) {
-    std::wstring text = L"Slot &" + std::to_wstring(slot + 1) + L"  \u00B7  ";
-    std::wstring path = state_path(slot);
-    WIN32_FILE_ATTRIBUTE_DATA info;
-    FILETIME local;
-    SYSTEMTIME when;
-    if (!path.empty() && GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &info) &&
+    std::wstring text = L"Slot &" + std::to_wstring(slot + 1) + L"  ·  ";
+    char path[1024];
+    WIN32_FILE_ATTRIBUTE_DATA info = {};
+    FILETIME local = {};
+    SYSTEMTIME when = {};
+    if (g.session && nacre_session_state_path(g.session, slot, path, sizeof(path)) &&
+        GetFileAttributesExW(widen(path).c_str(), GetFileExInfoStandard, &info) &&
         FileTimeToLocalFileTime(&info.ftLastWriteTime, &local) && FileTimeToSystemTime(&local, &when)) {
         wchar_t stamp[32];
         swprintf(stamp, 32, L"%04d-%02d-%02d %02d:%02d", when.wYear, when.wMonth, when.wDay, when.wHour,
@@ -1070,49 +1143,43 @@ std::wstring slot_label(int slot) {
     return text + L"empty";
 }
 
+bool states_ready() { return ready() && nacre_session_has_states(g.session); }
+
 void save_state() {
-    if (!g.is_gb || !g.gb || g.rom.empty()) return;
-    std::wstring path = state_path(g.slot);
-    std::wstring slot = std::to_wstring(g.slot + 1);
-    if (path.empty()) {
+    if (!ready()) return;
+    if (!states_ready()) {
         set_status(L"Save states need a ROM opened from a file");
         return;
     }
-    std::vector<uint8_t> blob(gb_state_size(g.gb));
-    size_t size = blob.empty() ? 0 : gb_state_save(g.gb, blob.data(), blob.size());
-    if (size > 0 && write_atomic(path, blob.data(), size)) set_status(L"Saved state to slot " + slot);
-    else set_status(L"Couldn't save to slot " + slot);
+    char error[256];
+    if (nacre_session_save_state(g.session, g.slot, error, sizeof(error)))
+        set_status(L"Saved state to slot " + std::to_wstring(g.slot + 1));
+    else
+        set_status(widen(error));
 }
 
 void load_state() {
-    if (!g.is_gb || !g.gb || g.rom.empty()) return;
-    std::wstring path = state_path(g.slot);
-    std::wstring slot = std::to_wstring(g.slot + 1);
-    if (path.empty()) {
+    if (!ready()) return;
+    if (!states_ready()) {
         set_status(L"Save states need a ROM opened from a file");
         return;
     }
-    std::vector<uint8_t> blob;
-    DWORD code = read_bytes(path, 1u << 24, blob);
-    if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND) {
-        set_status(L"Slot " + slot + L" is empty");
-    } else if (code == 0 && gb_state_load(g.gb, blob.data(), blob.size())) {
-        /* The state remembers the buttons held when it was saved; what is held now wins. */
-        for (int b = 0; b < GB_BUTTON_COUNT; b++) gb_set_button(g.gb, (GbButton)b, g.gb_keys[b] ? 1 : 0);
-        gb_audio_clear(g.gb);
-        g.fault.clear();
-        g.previous = SDL_GetTicksNS();
-        g.gb_frame_seen = gb_frame_count(g.gb) - 1;
-        invalidate_well();
-        update_controls();
-        set_status(L"Loaded state from slot " + slot);
-    } else {
-        set_status(L"Slot " + slot + L" doesn't fit this game");
+    char error[256];
+    if (!nacre_session_load_state(g.session, g.slot, error, sizeof(error))) {
+        set_status(widen(error));
+        return;
     }
+    /* Cores keep the keys held now over the ones in the snapshot. */
+    core()->audio_clear(core_self());
+    g.previous = SDL_GetTicksNS();
+    g.frame_seen = 0;
+    invalidate_well();
+    update_controls();
+    set_status(L"Loaded state from slot " + std::to_wstring(g.slot + 1));
 }
 
 void set_slot(int slot) {
-    if (slot < 0 || slot >= GB_STATE_SLOTS) return;
+    if (slot < 0 || slot >= STATE_SLOTS) return;
     g.slot = slot;
     reg_set_dword(L"gbSlot", (DWORD)slot);
     set_status(L"State slot " + std::to_wstring(slot + 1));
@@ -1120,112 +1187,70 @@ void set_slot(int slot) {
     invalidate_all();
 }
 
-void read_save() {
-    g.save_note.clear();
-    if (g.save_path.empty()) return;
-    gb_set_wall_clock(g.gb, (int64_t)time(NULL));
-    std::vector<uint8_t> data;
-    DWORD code = read_bytes(g.save_path, 1u << 20, data);
-    if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND) {
-        g.save_note = L"Saves to " + file_name(g.save_path);
-    } else if (code == 0 && gb_save_load(g.gb, data.data(), data.size())) {
-        g.save_note = L"Loaded " + file_name(g.save_path);
-    } else {
-        /* Leave a save we can't use alone rather than overwrite it. */
-        g.save_note = L"Ignored " + file_name(g.save_path) + L"; it doesn't fit this cartridge";
-        g.save_path.clear();
-    }
-}
+/* ---- Opening content --------------------------------------------------- */
 
-void start_machine() {
-    if (g.is_gb) {
-        write_save();
-        gb_reset(g.gb);
-        gb_audio_clear(g.gb);
-        release_keys();
-        g.fault.clear();
-        g.user_paused = false;
-        g.previous = SDL_GetTicksNS();
-        memset(g.shown_gb_keys, 0, sizeof(g.shown_gb_keys));
-        return;
+/* Swaps in a new game. A failed open keeps the one running. */
+bool open_with(const NacreCore *forced, const char *path, const uint8_t *data, size_t size, bool bundled) {
+    char error[256] = "";
+    release_keys(); /* nothing held carries over to the next game */
+    if (!nacre_session_open(g.session, forced, path, data, size, error, sizeof(error))) {
+        std::wstring message = sentence(error);
+        if (ready()) message += L" Your current session has been kept.";
+        show_alert(message);
+        return false;
     }
-    char error[256];
-    Chip8 candidate;
-    chip8_init(&candidate, 0x4E414352u);
-    if (!chip8_load_bytes(&candidate, g.rom.data(), g.rom.size(), error, sizeof(error))) return;
-    g.machine = candidate;
-    g.fault.clear();
-    g.user_paused = false;
-    chip8_scheduler_init(&g.scheduler, g.cpu_hz);
-    g.previous = SDL_GetTicksNS();
-    memset(g.shown_keys, 0, sizeof(g.shown_keys));
-}
-
-/* A file with a Game Boy cartridge header runs on the Game Boy core; anything
- * else must be a CHIP-8 program. A failed load keeps the current session. */
-void load_candidate(const std::vector<uint8_t> &bytes, const std::wstring &path, bool bundled) {
-    char error[256];
-    bool gb_rom = !bundled && gb_rom_looks_valid(bytes.data(), bytes.size());
-    if (gb_rom) {
-        if (!g.gb) {
-            show_alert(L"The Game Boy core couldn't start, so this ROM can't run.");
-            return;
-        }
-        write_save(); /* the cartridge being replaced */
-        if (!gb_load_rom(g.gb, bytes.data(), bytes.size(), error, sizeof(error))) {
-            show_alert(widen(error) + L" Your current session has been kept.");
-            return;
-        }
-    } else {
-        if (bytes.size() > MAX_ROM) {
-            show_alert(L"That file has no Game Boy cartridge header, and a CHIP-8 ROM can be at "
-                       L"most 3,584 bytes. Your current session has been kept.");
-            return;
-        }
-        Chip8 candidate;
-        chip8_init(&candidate, 0x4E414352u);
-        if (!chip8_load_bytes(&candidate, bytes.data(), bytes.size(), error, sizeof(error))) {
-            show_alert(widen(error));
-            return;
-        }
-        write_save();
-    }
-    g.is_gb = gb_rom;
-    g.rom = bytes;
-    g.rom_path = path;
     g.rom_bundled = bundled;
-    g.save_path.clear();
-    g.save_note.clear();
-    if (gb_rom) {
-        if (gb_has_battery(g.gb) && !path.empty()) {
-            g.save_path = save_path_for(path);
-            read_save();
-        }
-        g.gb_frame_seen = gb_frame_count(g.gb) - 1;
-        g.fault.clear();
-        g.user_paused = false;
-        g.previous = SDL_GetTicksNS();
-        release_keys();
-        memset(g.shown_gb_keys, 0, sizeof(g.shown_gb_keys));
-    } else {
-        start_machine();
-    }
-    if (!bundled && !path.empty()) note_recent(path);
+    g.user_paused = false;
+    g.pad_buttons = 0;
+    g.frame_seen = 0;
+    g.shown_save_note.clear();
+    if (path && !bundled) note_recent(widen(path));
+    g.previous = SDL_GetTicksNS();
+    sync_session();
+    pump_audio(); /* opens the device at the new core's rate */
     SetFocus(g.hwnd);
-    sync_audio();
     update_controls();
+    return true;
 }
 
+/* Detects the system from the file's head, then hands the core the whole file, or
+ * only its path when the core reads content itself. */
 void load_file(const std::wstring &path) {
-    std::vector<uint8_t> bytes;
-    std::string error;
-    if (!read_file(path, bytes, error)) {
-        show_alert(widen(error.c_str()));
+    std::vector<uint8_t> head;
+    uint64_t total = 0;
+    DWORD code = read_bytes(path, NACRE_PROBE_BYTES, head, false, &total);
+    if (code != 0) {
+        show_alert(code == (DWORD)-1
+                       ? std::wstring(L"That file is empty. Your current session has been kept.")
+                       : L"Nacre couldn't read that file (Windows error " + std::to_wstring(code) +
+                             L"). Your current session has been kept.");
         return;
     }
-    load_candidate(bytes, path, false);
+    std::string utf8 = narrow(path);
+    const NacreCore *found = nacre_core_detect(head.data(), head.size(), (size_t)total, utf8.c_str());
+    if (!found) {
+        show_alert(L"Nacre doesn't recognize that file as a game for any system it runs. Your current "
+                   L"session has been kept.");
+        return;
+    }
+    if (found->flags & NACRE_CORE_NEEDS_PATH) {
+        open_with(found, utf8.c_str(), NULL, 0, false);
+        return;
+    }
+    std::vector<uint8_t> bytes;
+    code = total == head.size() ? 0 : read_bytes(path, MAX_CONTENT, bytes);
+    if (code != 0) {
+        show_alert(code == (DWORD)-1 ? std::wstring(L"That file is too large to open. Your current session has been kept.")
+                                     : L"Nacre couldn't read that file (Windows error " + std::to_wstring(code) +
+                                           L"). Your current session has been kept.");
+        return;
+    }
+    const std::vector<uint8_t> &content = total == head.size() ? head : bytes;
+    open_with(found, utf8.c_str(), content.data(), content.size(), false);
 }
 
+/* The welcome program is built in. It opens as bytes with no path, so nothing is
+ * ever written beside the install. */
 void load_demo() {
     HRSRC resource = FindResourceW(NULL, L"NACRE_ROM", RT_RCDATA);
     HGLOBAL loaded = resource ? LoadResource(NULL, resource) : NULL;
@@ -1234,8 +1259,7 @@ void load_demo() {
         show_alert(L"The welcome ROM is missing from this build.");
         return;
     }
-    std::vector<uint8_t> bytes(data, data + SizeofResource(NULL, resource));
-    load_candidate(bytes, L"", true);
+    open_with(nacre_core_by_id("chip8"), NULL, data, SizeofResource(NULL, resource), true);
 }
 
 /* ---- Commands ---------------------------------------------------------- */
@@ -1244,30 +1268,31 @@ void open_rom() {
     if (g.dialog_open) return;
     g.dialog_open = true;
     release_keys();
-    sync_audio();
+    pump_audio();
     std::wstring path;
     bool picked = pick_rom_path(path);
     g.dialog_open = false;
     g.previous = SDL_GetTicksNS();
     SetFocus(g.hwnd);
-    sync_audio();
     if (picked) load_file(path);
     update_controls();
 }
 
 void toggle_pause() {
-    if (g.rom.empty() || !g.fault.empty()) return;
+    if (!ready() || fault()) return;
     g.user_paused = !g.user_paused;
     release_keys();
-    sync_audio();
     update_controls();
     SetFocus(g.hwnd);
 }
 
 void restart_rom() {
-    if (g.rom.empty()) return;
-    start_machine();
-    sync_audio();
+    if (!ready()) return;
+    release_keys();
+    nacre_session_restart(g.session); /* writes the battery save first; clears a fault */
+    g.user_paused = false;
+    g.previous = SDL_GetTicksNS();
+    g.frame_seen = 0;
     update_controls();
     SetFocus(g.hwnd);
 }
@@ -1275,7 +1300,6 @@ void restart_rom() {
 void toggle_sound() {
     g.muted = !g.muted;
     reg_set_dword(L"muted", g.muted ? 1 : 0);
-    sync_audio();
     update_controls();
     SetFocus(g.hwnd);
 }
@@ -1290,16 +1314,14 @@ void set_palette(int index) {
 
 void set_speed(int index) {
     if (index < 0 || index > 2) return;
-    if (g.is_gb) {
-        g.gb_speed = index;
+    if (look().clock_speed) {
+        g.cpu_hz = CLOCK_HZ[index];
+        nacre_session_set_option(g.session, look().id, "cpu_hz", std::to_string(g.cpu_hz).c_str());
+        reg_set_dword(L"cpuHz", g.cpu_hz);
+    } else {
+        g.speed_choice = index;
         reg_set_dword(L"gbSpeed", (DWORD)index);
-        update_controls();
-        SetFocus(g.hwnd);
-        return;
     }
-    g.cpu_hz = SPEED_HZ[index];
-    chip8_scheduler_set_cpu_hz(&g.scheduler, g.cpu_hz);
-    reg_set_dword(L"cpuHz", g.cpu_hz);
     update_controls();
     SetFocus(g.hwnd);
 }
@@ -1333,7 +1355,7 @@ void show_about() {
     bool was_open = g.dialog_open;
     g.dialog_open = true;
     release_keys();
-    sync_audio();
+    pump_audio();
     TaskDialog(g.hwnd, NULL, L"About Nacre", L"Nacre " NACRE_VERSION_W,
                L"A small CHIP-8 and Game Boy machine.\nMade by tdotlab.\n\nFree software under the GNU GPL, "
                L"version 3 or later (see LICENSE).\nSound uses SDL3, bundled under its zlib license "
@@ -1341,7 +1363,7 @@ void show_about() {
                TDCBF_OK_BUTTON, TD_INFORMATION_ICON, NULL);
     g.dialog_open = was_open;
     g.previous = SDL_GetTicksNS();
-    sync_audio();
+    pump_audio();
     update_controls();
 }
 
@@ -1471,7 +1493,7 @@ void show() {
     int y = owner.top + ((owner.bottom - owner.top) - h) / 2;
     dlg = Dialog();
     dlg.capture = -1;
-    dlg.window = CreateWindowExW(ex, L"NacreControls", L"Game Boy controls", style, x, y, w, h, g.hwnd, NULL,
+    dlg.window = CreateWindowExW(ex, L"NacreControls", L"Controls", style, x, y, w, h, g.hwnd, NULL,
                                  g.instance, NULL);
     if (!dlg.window) return;
 
@@ -1505,7 +1527,7 @@ void show() {
     bool was_open = g.dialog_open;
     g.dialog_open = true;
     release_keys();
-    sync_audio();
+    pump_audio();
     EnableWindow(g.hwnd, FALSE);
     ShowWindow(dlg.window, SW_SHOW);
     SetFocus(dlg.done);
@@ -1533,7 +1555,7 @@ void show() {
     g.dialog_open = was_open;
     g.previous = SDL_GetTicksNS();
     SetFocus(g.hwnd);
-    sync_audio();
+    pump_audio();
     update_controls();
 }
 
@@ -1562,7 +1584,7 @@ void on_command(int id) {
     default:
         if (id >= IDM_SPEED_BASE && id < IDM_SPEED_BASE + 3) set_speed(id - IDM_SPEED_BASE);
         else if (id >= IDM_PALETTE_BASE && id < IDM_PALETTE_BASE + 3) set_palette(id - IDM_PALETTE_BASE);
-        else if (id >= IDM_SLOT_BASE && id < IDM_SLOT_BASE + GB_STATE_SLOTS) {
+        else if (id >= IDM_SLOT_BASE && id < IDM_SLOT_BASE + STATE_SLOTS) {
             set_slot(id - IDM_SLOT_BASE);
             SetFocus(g.hwnd);
         }
@@ -1587,36 +1609,37 @@ int chip_key(UINT scan) {
     }
 }
 
-void set_gb_key(int button, bool held) {
-    g.gb_kb[button] = held;
-    apply_buttons();
-}
-
-/* A bound Game Boy key was pressed or released. */
-void gb_action_press(int action, bool repeat) {
+/* A bound key was pressed. Pad buttons reach the core; fast-forward and the state
+ * keys work for any game. */
+void action_press(int action, bool repeat) {
     if (action < GBI_BUTTONS) {
-        if (!paused() && !repeat) set_gb_key(action, true);
+        if (!paused() && !repeat) {
+            g.kb_held |= GBI_BIT(action);
+            apply_buttons();
+        }
     } else if (action == GBI_FAST_FORWARD) {
         g.ff_key = true;
     } else if (!repeat) {
         if (action == GBI_SAVE_STATE) save_state();
         else if (action == GBI_LOAD_STATE) load_state();
-        else if (action == GBI_NEXT_SLOT) set_slot((g.slot + 1) % GB_STATE_SLOTS);
+        else if (action == GBI_NEXT_SLOT) set_slot((g.slot + 1) % STATE_SLOTS);
     }
 }
 
-void gb_action_release(int action) {
-    if (action < GBI_BUTTONS) set_gb_key(action, false);
-    else if (action == GBI_FAST_FORWARD) g.ff_key = false;
+void action_release(int action) {
+    if (action < GBI_BUTTONS) {
+        g.kb_held &= ~GBI_BIT(action);
+        apply_buttons();
+    } else if (action == GBI_FAST_FORWARD) {
+        g.ff_key = false;
+    }
 }
 
 void sync_key_display() {
-    if (memcmp(g.shown_keys, g.machine.keys, sizeof(g.shown_keys)) != 0) {
-        memcpy(g.shown_keys, g.machine.keys, sizeof(g.shown_keys));
-        invalidate_keys();
-    }
-    if (memcmp(g.shown_gb_keys, g.gb_keys, sizeof(g.shown_gb_keys)) != 0) {
-        memcpy(g.shown_gb_keys, g.gb_keys, sizeof(g.shown_gb_keys));
+    if (memcmp(g.shown_keypad, g.keypad_held, sizeof(g.shown_keypad)) != 0 ||
+        g.shown_pad_buttons != g.pad_buttons) {
+        memcpy(g.shown_keypad, g.keypad_held, sizeof(g.shown_keypad));
+        g.shown_pad_buttons = g.pad_buttons;
         invalidate_keys();
     }
 }
@@ -1627,29 +1650,33 @@ bool handle_key(UINT message, WPARAM wparam, LPARAM lparam, bool main_has_focus)
     if (!down && !up) return false;
     UINT scan = (lparam >> 16) & 0xFF;
     bool extended = (lparam & (1 << 24)) != 0;
-    if (g.is_gb) {
-        int action = gbi_lookup(&g.keys, key_code(scan, extended));
-        if (up) {
-            if (action < 0) return false;
-            gb_action_release(action);
-            sync_key_display();
-            return true;
-        }
-        if (action >= 0 && GetKeyState(VK_CONTROL) >= 0 && GetKeyState(VK_MENU) >= 0) {
-            gb_action_press(action, (lparam & (1 << 30)) != 0);
-            sync_key_display();
-            return true;
-        }
-    }
-    int key = extended || g.is_gb ? -1 : chip_key(scan);
-    if (up) {
-        if (key < 0) return false;
-        chip8_set_key(&g.machine, (uint8_t)key, 0);
+    bool repeat = (lparam & (1 << 30)) != 0;
+    bool modified = GetKeyState(VK_CONTROL) < 0 || GetKeyState(VK_MENU) < 0;
+
+    /* A keypad system takes the 4x4 block of keys before any binding. */
+    int key = has_keypad() && !extended ? chip_key(scan) : -1;
+    if (key >= 0) {
+        if (up) set_keypad_key(key, false);
+        else if (modified) return false;
+        else if (!paused() && !repeat) set_keypad_key(key, true);
         sync_key_display();
         return true;
     }
-    if (GetKeyState(VK_CONTROL) < 0 || GetKeyState(VK_MENU) < 0) return false;
-    bool repeat = (lparam & (1 << 30)) != 0;
+
+    int action = gbi_lookup(&g.keys, key_code(scan, extended));
+    if (action >= 0 && action < GBI_BUTTONS && !has_pad()) action = -1; /* nothing to press */
+    if (up) {
+        if (action < 0) return false;
+        action_release(action);
+        sync_key_display();
+        return true;
+    }
+    if (modified) return false;
+    if (action >= 0) {
+        action_press(action, repeat);
+        sync_key_display();
+        return true;
+    }
     if (!repeat) {
         if (wparam == VK_SPACE && main_has_focus) {
             toggle_pause();
@@ -1659,11 +1686,6 @@ bool handle_key(UINT message, WPARAM wparam, LPARAM lparam, bool main_has_focus)
             toggle_sound();
             return true;
         }
-    }
-    if (key >= 0) {
-        if (!paused() && !repeat) chip8_set_key(&g.machine, (uint8_t)key, 1);
-        sync_key_display();
-        return true;
     }
     return false;
 }
@@ -1732,21 +1754,21 @@ DropTarget drop_target;
 
 /* ---- Frame loop -------------------------------------------------------- */
 
-/* Reads the controllers: held buttons feed the console, and the state hotkeys fire once
+/* Reads the controllers: held buttons feed the core, and the state hotkeys fire once
  * per press. Only the focused window listens, so a game in the background isn't played. */
 void poll_pad() {
     unsigned held = pad_poll();
     const char *note = pad_take_message();
-    if (note && g.is_gb) set_status(widen(note));
-    bool listening = g.is_gb && !g.dialog_open && GetForegroundWindow() == g.hwnd;
+    if (note) set_status(widen(note));
+    bool listening = ready() && !g.dialog_open && GetForegroundWindow() == g.hwnd;
     if (!listening) held = 0;
     unsigned fresh = held & ~g.pad_seen;
     g.pad_seen = held;
     g.pad_held = held;
     apply_buttons();
-    if (fresh & PAD_BIT(GBI_SAVE_STATE)) save_state();
-    if (fresh & PAD_BIT(GBI_LOAD_STATE)) load_state();
-    if (fresh & PAD_BIT(GBI_NEXT_SLOT)) set_slot((g.slot + 1) % GB_STATE_SLOTS);
+    if (fresh & GBI_BIT(GBI_SAVE_STATE)) save_state();
+    if (fresh & GBI_BIT(GBI_LOAD_STATE)) load_state();
+    if (fresh & GBI_BIT(GBI_NEXT_SLOT)) set_slot((g.slot + 1) % STATE_SLOTS);
 }
 
 void tick() {
@@ -1754,52 +1776,32 @@ void tick() {
     g.in_tick = true;
     uint64_t now = SDL_GetTicksNS(), elapsed = now - g.previous;
     g.previous = now;
-    char error[256];
-    if (g.is_gb) {
-        poll_pad();
-        bool fast = (g.ff_key || (g.pad_held & PAD_BIT(GBI_FAST_FORWARD)) != 0) && !paused();
-        if (fast != g.ff_on) {
-            g.ff_on = fast;
-            invalidate_well();
-        }
-        if (!g.status.empty() && now >= g.status_until) {
-            g.status.clear();
-            invalidate_footer();
-        }
-        unsigned percent = g.ff_on ? GB_FAST_PERCENT : GB_SPEED_PERCENT[g.gb_speed];
-        if (!paused() && !gb_advance_ns(g.gb, elapsed, percent, error, sizeof(error))) {
-            g.fault = error;
-            write_save();
-            release_keys();
-            update_controls();
-            show_alert(widen(error));
-        }
-        sync_audio();
-        pump_gb_audio();
-        sync_key_display();
-        if (gb_frame_count(g.gb) != g.gb_frame_seen) invalidate_well();
-        /* Games write their save RAM in bursts; settle for a second before writing. */
-        if (!g.save_path.empty() && gb_save_dirty(g.gb)) {
-            if (!g.save_due) g.save_due = now + 1000000000u;
-            else if (now >= g.save_due) write_save();
-        }
-        g.in_tick = false;
-        return;
-    }
-    if (g.ff_on) {
-        g.ff_on = false;
+    poll_pad();
+    bool fast = (g.ff_key || (g.pad_held & GBI_BIT(GBI_FAST_FORWARD)) != 0) && !paused();
+    if (fast != g.ff_on) {
+        g.ff_on = fast;
         invalidate_well();
     }
-    if (!chip8_scheduler_advance(&g.machine, &g.scheduler, elapsed, paused(), timer_tick, NULL, error,
-                                 sizeof(error))) {
-        g.fault = error;
+    if (!g.status.empty() && now >= g.status_until) {
+        g.status.clear();
+        invalidate_footer();
+    }
+    sync_session();
+    /* Runs the game and writes the battery save once it has settled. */
+    if (g.session && !nacre_session_tick(g.session, elapsed, now)) {
         release_keys();
         update_controls();
-        show_alert(widen(error));
+        show_alert(sentence(fault()));
     }
-    sync_audio();
+    const char *note = g.session ? nacre_session_save_note(g.session) : "";
+    if (g.shown_save_note != note) {
+        g.shown_save_note = note;
+        invalidate_footer();
+    }
+    pump_audio();
     sync_key_display();
-    if (memcmp(g.shown, g.machine.display, sizeof(g.shown)) != 0) invalidate_well();
+    const NacreVideoFrame *frame = current_frame();
+    if (frame && frame->frame_count != g.frame_seen) invalidate_well();
     g.in_tick = false;
 }
 
@@ -1845,7 +1847,7 @@ bool capture_client(const std::wstring &path) {
 }
 
 /* A minimal 32 KB cartridge: a valid header and a JR -2 loop at the entry point,
- * so the Game Boy path can be checked without shipping a ROM. */
+ * so the pad path can be checked without shipping a ROM. */
 std::vector<uint8_t> snapshot_cartridge() {
     static const uint8_t logo[48] = {
         0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B, 0x03, 0x73, 0x00, 0x83, 0x00, 0x0C, 0x00, 0x0D,
@@ -1860,41 +1862,64 @@ std::vector<uint8_t> snapshot_cartridge() {
     return rom;
 }
 
+uint32_t frames_now() {
+    const NacreVideoFrame *frame = current_frame();
+    return frame ? frame->frame_count : 0;
+}
+
+/* Runs the game for `seconds` of emulated time through the session, at whatever
+ * speed is chosen. Returns false on a fault. */
+bool run_for(double seconds) {
+    sync_session();
+    const uint64_t step = 16666667;
+    for (uint64_t done = 0; done < (uint64_t)(seconds * 1e9); done += step)
+        if (!nacre_session_tick(g.session, step, SDL_GetTicksNS())) return false;
+    return true;
+}
+
 /* Presses and releases Right through the window's key path, then checks frames
  * advance. Returns 0, or base..base+2 for the failing step. */
-int check_gb_keys(int base) {
+int check_pad_keys(int base) {
     const LPARAM right = (LPARAM)(1 | (0x4D << 16) | (1 << 24)); /* extended scan code */
     SendMessageW(g.hwnd, WM_KEYDOWN, VK_RIGHT, right);
-    if (!g.gb_keys[GB_BUTTON_RIGHT]) return base;
+    if (!(g.pad_buttons & NACRE_PAD_BIT(NACRE_PAD_RIGHT))) return base;
     SendMessageW(g.hwnd, WM_KEYUP, VK_RIGHT, right | (LPARAM)(3u << 30));
-    if (g.gb_keys[GB_BUTTON_RIGHT]) return base + 1;
-    char error[256];
-    uint32_t frames = gb_frame_count(g.gb);
-    if (!gb_run_cycles(g.gb, GB_CLOCK_HZ / 5, error, sizeof(error)) || gb_frame_count(g.gb) - frames < 10)
-        return base + 2;
+    if (g.pad_buttons & NACRE_PAD_BIT(NACRE_PAD_RIGHT)) return base + 1;
+    uint32_t frames = frames_now();
+    if (!run_for(0.2) || frames_now() - frames < 10) return base + 2;
     return 0;
 }
 
-/* Fast-forward as a held key, a save-state round trip on the running cartridge, and the
- * rebinding table. Returns 0, or base..base+8 for the failing step. */
-int check_gb_features(int base) {
+/* A state round trip through the core table: save, run on, load back, and refuse
+ * a damaged copy. With `frames`, the frame counter must change and come back.
+ * Returns 0, or base..base+4. */
+int check_states(int base, bool frames) {
+    const NacreCore *c = core();
+    void *self = core_self();
+    size_t size = c->state_size ? c->state_size(self) : 0;
+    std::vector<uint8_t> blob(size);
+    if (!size || c->state_save(self, blob.data(), blob.size()) != size) return base;
+    uint32_t saved = frames_now();
+    if (!run_for(0.1) || (frames && frames_now() == saved)) return base + 1;
+    if (!c->state_load(self, blob.data(), blob.size())) return base + 2;
+    if (frames && frames_now() != saved) return base + 3;
+    blob[blob.size() / 2] ^= 0xFF;
+    blob[0] ^= 0xFF; /* a damaged header is refused */
+    if (c->state_load(self, blob.data(), blob.size())) return base + 4;
+    return 0;
+}
+
+/* Fast-forward as a held key, a state round trip, and the rebinding table.
+ * Returns 0, or base..base+8 for the failing step. */
+int check_features(int base) {
     const LPARAM tab = (LPARAM)(1 | (0x0F << 16));
     SendMessageW(g.hwnd, WM_KEYDOWN, VK_TAB, tab);
     if (!g.ff_key) return base;
     SendMessageW(g.hwnd, WM_KEYUP, VK_TAB, tab | (LPARAM)(3u << 30));
     if (g.ff_key) return base + 1;
 
-    char error[256];
-    std::vector<uint8_t> blob(gb_state_size(g.gb));
-    if (blob.empty() || gb_state_save(g.gb, blob.data(), blob.size()) != blob.size()) return base + 2;
-    uint32_t saved = gb_frame_count(g.gb);
-    if (!gb_run_cycles(g.gb, GB_CLOCK_HZ / 10, error, sizeof(error)) || gb_frame_count(g.gb) == saved)
-        return base + 3;
-    if (!gb_state_load(g.gb, blob.data(), blob.size())) return base + 4;
-    if (gb_frame_count(g.gb) != saved) return base + 5;
-    blob[blob.size() / 2] ^= 0xFF;
-    blob[0] ^= 0xFF; /* a damaged header is refused */
-    if (gb_state_load(g.gb, blob.data(), blob.size())) return base + 6;
+    int stage = check_states(base + 2, true);
+    if (stage) return stage;
 
     GbBindings original = g.keys;
     if (gbi_assign(&g.keys, GBI_A, 0, 0x0F) != GBI_FAST_FORWARD || g.keys.key[GBI_FAST_FORWARD][0] != -1)
@@ -1907,8 +1932,8 @@ int check_gb_features(int base) {
     return round_trip ? 0 : base + 8;
 }
 
-/* Exercise native actions and the physical keypad path before rendering, like
- * the Mac snapshot. Returns 0 on success or a nonzero stage number. */
+/* Exercise native actions and the physical key paths before rendering, like the
+ * Mac snapshot. Returns 0 on success or a nonzero stage number. */
 int run_snapshot() {
     bool original_mute = g.muted;
     SendMessageW(g.hwnd, WM_COMMAND, IDM_PAUSE, 0);
@@ -1918,38 +1943,40 @@ int run_snapshot() {
     SendMessageW(g.hwnd, WM_COMMAND, IDM_SOUND, 0);
     if (g.muted != original_mute) return 3;
     SendMessageW(g.hwnd, WM_COMMAND, IDM_RESTART, 0);
-    if (g.rom.empty() || !g.fault.empty()) return 4;
+    if (!ready() || fault()) return 4;
     g.focus_paused = false;
-    char error[256];
-    if (g.is_gb) {
+    if (!has_keypad()) {
         /* Launched with a cartridge: check its keys, run it a while, and capture it. */
-        int stage = check_gb_keys(12);
-        if (!stage) stage = check_gb_features(16);
+        int stage = check_pad_keys(12);
+        if (!stage) stage = check_features(16);
         if (stage) return stage;
-        if (!gb_run_cycles(g.gb, (uint32_t)(GB_CLOCK_HZ * g.snapshot_seconds), error, sizeof(error)))
-            return 15;
+        if (!run_for(g.snapshot_seconds)) return 15;
         invalidate_all();
         return capture_client(g.snapshot_path) ? 0 : 1;
     }
     /* The X key sits at physical scan code 0x2D and maps to CHIP-8 key 0. */
     SendMessageW(g.hwnd, WM_KEYDOWN, 'X', (LPARAM)(1 | (0x2D << 16)));
-    if (!g.machine.keys[0]) return 5;
+    if (!g.keypad_held[0]) return 5;
     SendMessageW(g.hwnd, WM_KEYUP, 'X', (LPARAM)(1 | (0x2D << 16) | (3u << 30)));
-    if (g.machine.keys[0]) return 6;
-
-    /* The Game Boy path on a stand-in cartridge, then back to the CHIP-8 ROM. */
-    std::vector<uint8_t> rom = g.rom;
-    std::wstring rom_path = g.rom_path;
-    bool bundled = g.rom_bundled;
-    load_candidate(snapshot_cartridge(), L"", false);
-    if (!g.is_gb || !g.fault.empty()) return 7;
-    int stage = check_gb_keys(8);
-    if (!stage) stage = check_gb_features(30);
+    if (g.keypad_held[0]) return 6;
+    int stage = check_states(40, false);
     if (stage) return stage;
-    load_candidate(rom, rom_path, bundled);
-    if (g.is_gb) return 11;
 
-    chip8_scheduler_advance(&g.machine, &g.scheduler, 200000000, 0, NULL, NULL, error, sizeof(error));
+    /* The pad path on a stand-in cartridge, picked by detection, then back. */
+    std::wstring original = content_path();
+    bool bundled = g.rom_bundled;
+    std::vector<uint8_t> cartridge = snapshot_cartridge();
+    if (!open_with(NULL, NULL, cartridge.data(), cartridge.size(), false) || has_keypad() || !has_pad() ||
+        fault())
+        return 7;
+    stage = check_pad_keys(8);
+    if (!stage) stage = check_features(30);
+    if (stage) return stage;
+    if (bundled || original.empty()) load_demo();
+    else load_file(original);
+    if (!has_keypad()) return 11;
+
+    if (!run_for(0.2)) return 45;
     invalidate_all();
     return capture_client(g.snapshot_path) ? 0 : 1;
 }
@@ -1975,7 +2002,7 @@ void build_menus() {
     AppendMenuW(g.session_menu, MF_STRING, IDM_SAVE_STATE, L"Sa&ve state");
     AppendMenuW(g.session_menu, MF_STRING, IDM_LOAD_STATE, L"&Load state");
     g.slot_menu = CreatePopupMenu();
-    for (int i = 0; i < GB_STATE_SLOTS; i++) AppendMenuW(g.slot_menu, MF_STRING, IDM_SLOT_BASE + i, L"Slot");
+    for (int i = 0; i < STATE_SLOTS; i++) AppendMenuW(g.slot_menu, MF_STRING, IDM_SLOT_BASE + i, L"Slot");
     AppendMenuW(g.session_menu, MF_POPUP, (UINT_PTR)g.slot_menu, L"S&tate slot");
     AppendMenuW(g.session_menu, MF_STRING, IDM_CONTROLS, L"&Controls…");
     AppendMenuW(g.session_menu, MF_SEPARATOR, 0, NULL);
@@ -2016,27 +2043,26 @@ void refresh_menu(HMENU menu) {
         }
         if (g.recents.empty()) AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"No recent ROMs");
     } else if (menu == g.session_menu) {
-        bool ready = !g.rom.empty();
-        EnableMenuItem(menu, IDM_PAUSE, MF_BYCOMMAND | (ready && g.fault.empty() ? MF_ENABLED : MF_GRAYED));
-        EnableMenuItem(menu, IDM_RESTART, MF_BYCOMMAND | (ready ? MF_ENABLED : MF_GRAYED));
-        EnableMenuItem(menu, IDM_SOUND, MF_BYCOMMAND | (g.audio_available ? MF_ENABLED : MF_GRAYED));
+        bool running = ready();
+        EnableMenuItem(menu, IDM_PAUSE, MF_BYCOMMAND | (running && !fault() ? MF_ENABLED : MF_GRAYED));
+        EnableMenuItem(menu, IDM_RESTART, MF_BYCOMMAND | (running ? MF_ENABLED : MF_GRAYED));
+        EnableMenuItem(menu, IDM_SOUND, MF_BYCOMMAND | (audio_available() ? MF_ENABLED : MF_GRAYED));
         ModifyMenuW(menu, IDM_PAUSE, MF_BYCOMMAND | MF_STRING, IDM_PAUSE,
                     g.user_paused ? L"&Resume\tCtrl+P" : L"&Pause\tCtrl+P");
         CheckMenuItem(menu, IDM_SOUND, MF_BYCOMMAND | (g.muted ? MF_UNCHECKED : MF_CHECKED));
-        bool states = g.is_gb && ready && !state_path(g.slot).empty();
-        UINT can = states ? MF_ENABLED : MF_GRAYED;
+        UINT can = states_ready() ? MF_ENABLED : MF_GRAYED;
         EnableMenuItem(menu, IDM_SAVE_STATE, MF_BYCOMMAND | can);
         EnableMenuItem(menu, IDM_LOAD_STATE, MF_BYCOMMAND | can);
-        EnableMenuItem(menu, 6, MF_BYPOSITION | (g.is_gb && ready ? MF_ENABLED : MF_GRAYED));
+        EnableMenuItem(menu, 6, MF_BYPOSITION | can);
         ModifyMenuW(menu, IDM_SAVE_STATE, MF_BYCOMMAND | MF_STRING, IDM_SAVE_STATE,
                     menu_label(L"Sa&ve state", GBI_SAVE_STATE).c_str());
         ModifyMenuW(menu, IDM_LOAD_STATE, MF_BYCOMMAND | MF_STRING, IDM_LOAD_STATE,
                     menu_label(L"&Load state", GBI_LOAD_STATE).c_str());
     } else if (menu == g.slot_menu) {
-        for (int i = 0; i < GB_STATE_SLOTS; i++)
+        for (int i = 0; i < STATE_SLOTS; i++)
             ModifyMenuW(menu, (UINT)i, MF_BYPOSITION | MF_STRING, (UINT_PTR)(IDM_SLOT_BASE + i),
                         slot_label(i).c_str());
-        CheckMenuRadioItem(menu, 0, GB_STATE_SLOTS - 1, (UINT)g.slot, MF_BYPOSITION);
+        CheckMenuRadioItem(menu, 0, STATE_SLOTS - 1, (UINT)g.slot, MF_BYPOSITION);
     } else if (menu == g.speed_menu) {
         for (int i = 0; i < 3; i++)
             ModifyMenuW(menu, (UINT)i, MF_BYPOSITION | MF_STRING, (UINT_PTR)(IDM_SPEED_BASE + i),
@@ -2153,11 +2179,12 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             g.focus_paused = true;
             release_keys();
             sync_key_display();
+            if (g.session) nacre_session_flush(g.session); /* switching away is a fine moment to save */
         } else {
             g.focus_paused = false;
             g.previous = SDL_GetTicksNS();
         }
-        sync_audio();
+        pump_audio();
         invalidate_header();
         invalidate_well();
         break;
@@ -2182,12 +2209,12 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         return 0;
     }
     case WM_CLOSE:
-        write_save();
+        if (g.session) nacre_session_flush(g.session);
         save_placement();
         DestroyWindow(hwnd);
         return 0;
     case WM_ENDSESSION:
-        if (wparam) write_save();
+        if (wparam && g.session) nacre_session_flush(g.session);
         return 0;
     case WM_DESTROY:
         KillTimer(hwnd, TIMER_TICK);
@@ -2221,16 +2248,25 @@ bool initialize(int show) {
     g.muted = reg_dword(L"muted", 0) != 0;
     g.palette = (int)reg_dword(L"palette", 0);
     if (g.palette < 0 || g.palette > 2) g.palette = 0;
-    g.cpu_hz = reg_dword(L"cpuHz", CHIP8_DEFAULT_CPU_HZ);
-    if (g.cpu_hz != 300 && g.cpu_hz != 600 && g.cpu_hz != 1000) g.cpu_hz = CHIP8_DEFAULT_CPU_HZ;
-    g.gb_speed = (int)reg_dword(L"gbSpeed", 1);
-    if (g.gb_speed < 0 || g.gb_speed > 2) g.gb_speed = 1;
+    /* A snapshot run ignores saved speed choices so its frame counts are stable. */
+    g.cpu_hz = g.ephemeral ? 600 : reg_dword(L"cpuHz", 600);
+    if (g.cpu_hz != 300 && g.cpu_hz != 600 && g.cpu_hz != 1000) g.cpu_hz = 600;
+    g.speed_choice = g.ephemeral ? 1 : (int)reg_dword(L"gbSpeed", 1);
+    if (g.speed_choice < 0 || g.speed_choice > 2) g.speed_choice = 1;
     load_bindings();
-    if (!g.ephemeral) g.slot = (int)std::min<DWORD>(reg_dword(L"gbSlot", 0), (DWORD)(GB_STATE_SLOTS - 1));
-    g.gb = gb_create();
+    if (!g.ephemeral) g.slot = (int)std::min<DWORD>(reg_dword(L"gbSlot", 0), (DWORD)(STATE_SLOTS - 1));
     if (!g.ephemeral) load_recents();
-    chip8_init(&g.machine, 0x4E414352u);
-    chip8_scheduler_init(&g.scheduler, g.cpu_hz);
+
+    /* The session runs whichever core a file picks; a snapshot run never writes. */
+    NacreSessionIo io = {io_read, io_write, io_now, NULL};
+    NacreHost host = {};
+    host.log = host_log;
+    g.session = nacre_session_create(&io, &host, g.ephemeral ? 0 : 1);
+    if (!g.session) return false;
+    nacre_session_set_option(g.session, "chip8", "cpu_hz", std::to_string(g.cpu_hz).c_str());
+    g.audio = audio_out_create();
+    g.applied_running = -1;
+    g.applied_speed = 0;
 
     HICON icon_big = static_cast<HICON>(LoadImageW(g.instance, MAKEINTRESOURCEW(1), IMAGE_ICON,
                                               GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), 0));
@@ -2257,7 +2293,7 @@ bool initialize(int show) {
     g.tooltips = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, NULL, WS_POPUP | TTS_ALWAYSTIP,
                                  CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, g.hwnd,
                                  NULL, g.instance, NULL);
-    g.open = make_button(IDM_OPEN, L"Open a CHIP-8 or Game Boy ROM (Ctrl+O)");
+    g.open = make_button(IDM_OPEN, L"Open a game (Ctrl+O)");
     g.pause = make_button(IDM_PAUSE, L"Pause or resume (Space)");
     g.restart = make_button(IDM_RESTART, L"Restart the loaded ROM (Ctrl+R)");
     g.sound = make_button(IDM_SOUND, L"Toggle sound (M)");
@@ -2277,29 +2313,18 @@ bool initialize(int show) {
     }
     RegisterDragDrop(g.hwnd, &drop_target);
 
-    chip8_audio_oscillator_reset(&g.audio.oscillator);
-    SDL_AudioSpec spec = {SDL_AUDIO_S16, 1, CHIP8_AUDIO_SAMPLE_RATE};
-    g.audio.stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec,
-                                               audio_callback, &g.audio);
-    g.audio_available = g.audio.stream && SDL_ResumeAudioStreamDevice(g.audio.stream);
-    /* The Game Boy pushes stereo samples itself; its stream stays paused until a
-     * cartridge runs. */
-    SDL_AudioSpec gb_spec = {SDL_AUDIO_S16, 2, (int)GB_AUDIO_SAMPLE_RATE};
-    g.gb_stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &gb_spec, NULL, NULL);
-
     ShowWindow(g.hwnd, show);
     return true;
 }
 
 void shutdown() {
-    write_save();
-    SDL_SetAtomicInt(&g.audio.active, 0);
-    if (g.audio.stream) SDL_DestroyAudioStream(g.audio.stream);
-    if (g.gb_stream) SDL_DestroyAudioStream(g.gb_stream);
-    delete g.gb_bitmap;
-    g.gb_bitmap = NULL;
-    gb_destroy(g.gb);
-    g.gb = NULL;
+    /* Destroying the session writes any battery save still pending. */
+    nacre_session_destroy(g.session);
+    g.session = NULL;
+    audio_out_destroy(g.audio);
+    g.audio = NULL;
+    delete g.frame_bitmap;
+    g.frame_bitmap = NULL;
     for (auto &entry : g.fonts) delete entry.second;
     g.fonts.clear();
 }
@@ -2335,7 +2360,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     int status = 1;
     if (initialize(g.snapshot_path.empty() ? show : SW_SHOWNORMAL)) {
         if (!rom_argument.empty()) load_file(rom_argument);
-        if (g.rom.empty()) load_demo();
+        if (!ready()) load_demo();
         update_controls();
         g.previous = SDL_GetTicksNS();
         SetFocus(g.hwnd);
