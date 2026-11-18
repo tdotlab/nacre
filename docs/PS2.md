@@ -32,7 +32,7 @@ to the PCSX2 project.
 | `wake` | Errors and VM stop (`Host::OnVMDestroyed`, `ReportErrorAsync`). Frames don't need it: the GS thread presents on its own |
 | `set_speed` | `VMManager::SetLimiterMode`: 100% is `Nominal`, fast-forward is `Turbo`, slow is `Slomo` (their percentages are settings) |
 | `audio_rate`, `audio_read` | **Gap.** SPU2 writes float stereo into an `AudioStream` that owns a cubeb or SDL device. Needs a small PCSX2 patch: a Nacre backend that resamples nothing and fills a ring the adapter converts to int16. Keeps mute, speed and the 40-150 ms queue policy in Nacre |
-| `set_buttons`, `set_axis` | `Pad::SetControllerState(port, bind, value)` with the DualShock 2 binds. All 16 `NACRE_PAD_*` buttons exist on the DS2 (South=Cross, East=Circle, West=Square, North=Triangle). Sticks map to `PAD_L_*`/`PAD_R_*` as half-axes. PCSX2's own `InputManager` sources stay off so it never opens gamepads behind Nacre's back |
+| `set_pad`, `set_axis` | `Pad::SetControllerState(port, bind, value)` with the DualShock 2 binds. All 16 `NACRE_PAD_*` buttons exist on the DS2 (South=Cross, East=Circle, West=Square, North=Triangle). Sticks map to `PAD_L_*`/`PAD_R_*` as half-axes. PCSX2's own `InputManager` sources stay off so it never opens gamepads behind Nacre's back |
 | `state_size/save/load` | **Mismatch.** PCSX2 states are zip files written asynchronously to a path (`VMManager::SaveState(filename, ...)`). The adapter can save to a temp file and read it back, which works but is slow. Better: give the session a path-based state hook for cores that write their own files |
 | `set_option` | Writes into an `INISettingsInterface` the adapter owns (renderer, upscale, etc.) then `VMManager::ApplySettings` |
 | `title` | `VMManager::GetTitle` |
@@ -50,33 +50,55 @@ Two changes to the Nacre interface, both additive:
 
 ## Build
 
-PCSX2 is C++20, built with CMake and its own dependency bundle
-(`.github/workflows/scripts/windows/build-dependencies.bat`: SDL3, zstd, lz4,
-libpng, libjpeg, webp, freetype, harfbuzz, shaderc, DirectX headers, Qt and
-more). Qt and KDDockWidgets are only for `pcsx2-qt`; the core doesn't need them.
+PCSX2 lives in this repo as a squashed `git subtree` at `third_party/pcsx2/`.
+The adapter is `third_party/pcsx2/pcsx2-nacre/`, built by PCSX2's own CMake when
+`ENABLE_NACRE_CORE=ON`, into a self-contained folder `<build>/nacre-ps2/`:
 
-Two collisions with Nacre's current Windows build:
+- `nacre_ps2.dll`: PCSX2 plus the adapter. Exports `nacre_plugin_core()`, which
+  returns the `NacreCore` table, and `nacre_ps2_frames_presented()` for tests.
+- `nacre_ps2_smoke.exe`: loads the DLL like a frontend, boots a disc in a Win32
+  window, checks frames, pause/resume and teardown, and saves a capture.
+- PCSX2's runtime DLLs (SDL3, zstd, shaderc, ffmpeg, ...), `D3D12/` and `resources/`.
 
-- C runtime: Nacre links it statically (`MultiThreaded`), PCSX2 and its
-  dependencies use the DLL runtime. A process can't mix them safely across C++
-  boundaries, so builds with the PS2 core switch Nacre to the DLL runtime.
-- SDL3: Nacre compiles SDL 3.4.20 in statically; PCSX2 links its own SDL3 DLL.
-  One SDL per process, so the PS2 build uses PCSX2's.
+The core is a runtime plugin rather than linked into Nacre because the two
+builds disagree: Nacre links the C runtime and SDL3 statically; PCSX2 and its
+dependency bundle use the DLL runtime and SDL3.dll. Behind a plain-C table those
+never meet, so the default Nacre build stays one small executable and needs no
+dependency bundle. A frontend loads the plugin with
+`LoadLibraryEx(..., LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)`
+so its dependencies resolve from its own folder. PCSX2's SDL input and audio are
+off, so its SDL copy never touches devices Nacre's SDL owns.
 
-The PS2 core is an optional build (`NACRE_WITH_PS2`), so the default Nacre build
-stays a single small executable with no dependency bundle. Windows x64 first.
-Mac and Linux follow PCSX2's own CI scripts; whether PCSX2's recompilers run
-natively on Apple Silicon has not been checked.
+Windows build, from a VS x64 developer prompt (VS 18 Build Tools works):
+
+```
+cd third_party\pcsx2
+mklink /J deps <path to a built PCSX2 dependency bundle>
+cmake . -B build-nacre -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=%CD%\deps ^
+  -DENABLE_QT_UI=OFF -DENABLE_TESTS=OFF -DENABLE_NACRE_CORE=ON -DDISABLE_ADVANCE_SIMD=ON
+cmake --build build-nacre --target nacre_ps2 nacre_ps2_smoke
+build-nacre\nacre-ps2\nacre_ps2_smoke.exe <disc> <bios-dir> [seconds] [capture.bmp] [rounds]
+```
+
+The dependency bundle comes from
+`.github/workflows/scripts/windows/build-dependencies.bat` (see Status for the
+local quirks). `deps/` and `build*/` are ignored. Windows x64 first; Mac and
+Linux follow PCSX2's own CI scripts, and whether its recompilers run natively on
+Apple Silicon has not been checked.
 
 ## Tracking upstream
 
 Nacre carries its own copy of PCSX2 and changes it freely where that is cleaner
 than working around it. To keep monthly upstream merges mechanical:
 
-- The upstream base commit is recorded in one machine-readable file next to the
-  copy, so a scheduled job can compare it with upstream `master`.
-- Nacre's changes to PCSX2 sit on top of upstream as small, labelled commits, so a
-  conflict names the patch it hit.
+- The upstream base is recorded in `third_party/PCSX2_UPSTREAM` (key=value: repo,
+  tag, commit, date), so a scheduled job can compare it with upstream tags. Sync
+  with `git subtree pull --prefix=third_party/pcsx2 <repo> <tag> --squash`, then
+  update that file.
+- Nacre's changes to PCSX2 sit on top of upstream as small commits prefixed
+  `pcsx2:`, so a conflict names the patch it hit. New files go in
+  `pcsx2-nacre/`; edits to upstream files stay minimal (today: one `option` and
+  `add_subdirectory` in the top-level `CMakeLists.txt`).
 - Merges target a PCSX2 nightly tag, which has passed their CI, not an arbitrary
   commit.
 - A merge is done when the PS2 smoke test passes: the test disc boots and produces
@@ -87,19 +109,49 @@ or dispatches an agent to do the merge.
 
 ## Status
 
-Stock PCSX2 builds and runs on the owner's Windows machine (2026-11-17). Upstream
-`8407746` is cloned outside the repo at `tools/source-code-of-open-source/pcsx2`.
-The dependency bundle, Release build (Qt UI plus gsrunner, no LTO) and
-`cmake --install` all succeed with VS 18 Build Tools. The SCPH-70012 USA BIOS
-(v02.00) boots San Andreas (SLUS-20946) to the intro credits at 60 FPS on D3D12.
-No Nacre code is involved yet.
+**P1 done (2026-11-18): the adapter boots games through `NacreCore`.** On the
+owner's Windows machine (i5-8400, GTX 1070), `nacre_ps2_smoke` boots San Andreas
+(SLUS-20946) with the SCPH-70012 USA BIOS, picked by region from a folder of
+three. It passes every check over three create/run/pause/destroy rounds in one
+process. Steady state is ~60 presented frames per second on D3D12 after a few
+seconds of shader compilation. Pause stops frames within a vsync, resume
+restarts them, and a capture at 40 s shows the intro movie with no PCSX2 UI.
+No Nacre frontend loads the plugin yet; that is the next milestone.
 
-Local build quirks, kept in `tools/source-code-of-open-source/pcsx2-local/`:
+The adapter covers threaded run/pause on its own CPU thread (a command queue
+drained at vsync), native-surface attach and resize, DualShock 2 buttons and
+sticks, speed (`Nominal`/`Turbo`/`Slomo`), title, BIOS choice, and the options
+`bios`, `renderer`, `upscale`, `fast_boot` and `osd`. Audio is stubbed
+(`SPU2/Output` is `Null`), states and memory-card mapping are not wired, and
+PCSX2's own on-screen messages are off by default.
+
+Changes to upstream PCSX2 files so far:
+
+- `CMakeLists.txt`: the `ENABLE_NACRE_CORE` option.
+- `pcsx2/vtlb.cpp`: install the page-fault handler once per process. Upstream
+  assumes one VM-memory allocation per process and asserts on the second boot.
+
+Known issues:
+
+- A failed `pxAssertRel` opens a modal Win32 dialog (`common/Assertions.cpp`),
+  which looks like a hang inside a frontend. On the owner's machine,
+  `tools/junk/pcsx2-spike/read-dialogs.ps1` reads such dialogs with UI
+  Automation. A host hook that logs and stops the core would be better.
+- PCSX2's base settings layer can be set once per process, so the adapter keeps
+  one `MemorySettingsInterface` and resets it on each `create`.
+- Not checked: sustained play, memory growth over many rounds, Vulkan and
+  OpenGL, other games.
+
+Next, in order: a Nacre `AudioStream` backend feeding `audio_read`; Windows
+frontend plugin loading and `attach_surface` (a child HWND in the display well),
+with `system_dir` and `save_dir` wiring; memory cards in `save_dir`; the
+path-based save-state hook; Mac and Linux.
+
+Local build quirks for the dependency bundle, kept in
+`tools/source-code-of-open-source/pcsx2-local/` on the owner's machine:
 
 - `vswhere` needs `-products *` to see a Build Tools-only install.
 - Archive symlinks need Developer Mode. Without it, a 7-Zip wrapper skips them.
 - Ninja and CMake come from Build Tools' bundled copies.
 
 Test BIOS and disc images live in `C:\Users\ringd\tools\ps2\`, never in a repo.
-The next milestone is the adapter skeleton: `Host::` from gsrunner, a VMManager
-thread, and a native-surface Windows frontend.

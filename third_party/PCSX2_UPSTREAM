@@ -1,0 +1,7 @@
+# The PCSX2 release third_party/pcsx2/ was last synced from.
+# Machine-readable: one key=value per line. Update after every subtree pull.
+# Sync: git subtree pull --prefix=third_party/pcsx2 https://github.com/PCSX2/pcsx2.git <tag> --squash
+repo=https://github.com/PCSX2/pcsx2.git
+tag=v2.9.181
+commit=840774630f7a1a456e50575df62ec0b72cc00a98
+date=2026-11-16
