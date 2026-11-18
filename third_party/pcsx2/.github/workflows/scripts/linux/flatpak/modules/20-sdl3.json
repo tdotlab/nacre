@@ -1,0 +1,30 @@
+{
+  "name": "sdl3",
+  "buildsystem": "cmake-ninja",
+  "builddir": true,
+  "config-opts": [
+    "-DBUILD_SHARED_LIBS=ON",
+    "-DSDL_SHARED=ON",
+    "-DSDL_STATIC=OFF",
+    "-DSDL_TESTS=OFF"
+  ],
+  "build-options": {
+    "strip": true
+  },
+  "sources": [
+    {
+      "type": "archive",
+      "url": "https://github.com/libsdl-org/SDL/releases/download/release-3.4.20/SDL3-3.4.20.tar.gz",
+      "sha256": "f3bb06f55bed9557227a700af2ea62e49497ebdf58037732a731a5fb3ef8581f"
+    }
+  ],
+  "cleanup": [
+    "/bin",
+    "/include",
+    "/lib/*.a",
+    "/lib/*.la",
+    "/lib/cmake",
+    "/lib/pkgconfig",
+    "/share/aclocal"
+  ]
+}
