@@ -1344,12 +1344,16 @@ bool vtlb_Core_Alloc()
 	DevCon.WriteLn(Color_StrongGreen, "Fastmem area: %p - %p",
 		vtlbdata.fastmem_base, vtlbdata.fastmem_base + (FASTMEM_AREA_SIZE - 1));
 
+	// Nacre: hosts may boot more than one VM per process, and the handler is process-wide
+	// and never removed, so install it once.
+	static bool s_page_fault_handler_installed = false;
 	Error error;
-	if (!PageFaultHandler::Install(&error))
+	if (!s_page_fault_handler_installed && !PageFaultHandler::Install(&error))
 	{
 		Host::ReportErrorAsync("Failed to install page fault handler.", error.GetDescription());
 		return false;
 	}
+	s_page_fault_handler_installed = true;
 
 	return true;
 }
