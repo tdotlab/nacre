@@ -163,6 +163,11 @@ build-specific; a portable, versioned format (and CHIP-8 states) with ROM identi
 profile, RNG, and machine state is still open. SUPER-CHIP,
 XO-CHIP, rewind, and web builds each deserve a separate scope decision.
 
+## PS2
+
+A PS2 core built on PCSX2 is in progress. docs/PS2.md has the interface mapping,
+the build plan, how upstream is tracked, and the current status.
+
 ## Suggested implementation settings
 
 | Work | Codex | Claude | Reason |

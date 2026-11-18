@@ -11,6 +11,7 @@ the emulated architecture; use Nacre for product branding.
 - Read README.md for current setup, commands, and entry points.
 - Read docs/ARCHITECTURE.md for the source map and frontend boundaries.
 - Read docs/ROADMAP.md for the desktop design, review findings, milestones, and open decisions.
+- Read docs/PS2.md before touching the PCSX2-based PS2 core. Never commit BIOS or disc images.
 - Keep the emulator core independent of SDL, terminal APIs, and desktop UI code.
 - Game Boy core changes must keep `make test` green with the ROMs from
   `tools/get-gb-test-roms.py`; never commit those ROMs or game ROMs.
