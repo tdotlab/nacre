@@ -70,6 +70,12 @@ else()
 	add_subdirectory(pcsx2-gsrunner EXCLUDE_FROM_ALL)
 endif()
 
+# Nacre core plugin (nacre_ps2). Not part of upstream PCSX2.
+option(ENABLE_NACRE_CORE "Build nacre_ps2, PCSX2 as a Nacre core plugin" OFF)
+if(ENABLE_NACRE_CORE)
+	add_subdirectory(pcsx2-nacre)
+endif()
+
 #-------------------------------------------------------------------------------
 if(NOT IS_SUPPORTED_COMPILER)
 	message(WARNING "
