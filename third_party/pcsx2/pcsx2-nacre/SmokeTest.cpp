@@ -7,8 +7,10 @@
 //   nacre_ps2_smoke <disc> <bios-dir> [seconds=20] [capture.bmp] [rounds=1]
 //
 // Checks: the table loads, a VM starts, frames are presented, pausing stops frame
-// production and resuming restarts it, and the core tears down (and boots again
-// when rounds > 1). Prints PASS or FAIL lines and exits non-zero on failure.
+// production and resuming restarts it, audio arrives at the core's rate and is not
+// silent, and the core tears down (and boots again when rounds > 1). With a capture
+// path, the last round also writes the second half's audio beside it as .wav.
+// Prints PASS or FAIL lines and exits non-zero on failure.
 
 #ifndef _WIN32
 int main() { return 0; }
@@ -33,6 +35,55 @@ typedef uint64_t (*FramesFn)(void);
 
 static FramesFn g_frames;
 static int g_failures;
+
+// Audio drained the way the desktop frontend does it: everything available, every pump.
+static const NacreCore* g_core;
+static void* g_self;
+static uint64_t g_audio_frames;
+static int g_audio_peak;
+static bool g_audio_record;
+static std::vector<int16_t> g_audio_recorded;
+
+static void DrainAudio()
+{
+	if (!g_core || !g_self)
+		return;
+	static int16_t buf[4096 * 2];
+	size_t n;
+	while ((n = g_core->audio_read(g_self, buf, 4096)) > 0)
+	{
+		g_audio_frames += n;
+		for (size_t i = 0; i < n * 2; i++)
+			g_audio_peak = std::max(g_audio_peak, std::abs(static_cast<int>(buf[i])));
+		if (g_audio_record)
+			g_audio_recorded.insert(g_audio_recorded.end(), buf, buf + n * 2);
+	}
+}
+
+static bool SaveWav(const std::string& path, const std::vector<int16_t>& samples, unsigned rate)
+{
+	FILE* f = std::fopen(path.c_str(), "wb");
+	if (!f)
+		return false;
+	const uint32_t data_bytes = static_cast<uint32_t>(samples.size() * 2);
+	auto u32 = [f](uint32_t v) { std::fwrite(&v, 4, 1, f); };
+	auto u16 = [f](uint16_t v) { std::fwrite(&v, 2, 1, f); };
+	std::fwrite("RIFF", 1, 4, f);
+	u32(36 + data_bytes);
+	std::fwrite("WAVEfmt ", 1, 8, f);
+	u32(16);
+	u16(1); // PCM
+	u16(2);
+	u32(rate);
+	u32(rate * 4);
+	u16(4);
+	u16(16);
+	std::fwrite("data", 1, 4, f);
+	u32(data_bytes);
+	std::fwrite(samples.data(), 2, samples.size(), f);
+	std::fclose(f);
+	return true;
+}
 
 static void Check(bool ok, const char* what)
 {
@@ -61,6 +112,7 @@ static void Pump(DWORD ms)
 			TranslateMessage(&msg);
 			DispatchMessageW(&msg);
 		}
+		DrainAudio();
 		Sleep(10);
 	}
 }
@@ -163,6 +215,15 @@ static bool RunRound(const NacreCore* core, HWND hwnd, const char* disc, const c
 	surface.scale = 1.0f;
 	Check(core->attach_surface(self, &surface, err, sizeof(err)) != 0, "attach_surface");
 
+	g_core = core;
+	g_self = self;
+	g_audio_frames = 0;
+	g_audio_peak = 0;
+	g_audio_recorded.clear();
+	const unsigned audio_rate = core->audio_rate(self);
+	std::printf("  audio_rate %u\n", audio_rate);
+	Check(audio_rate == 48000, "audio_rate is 48 kHz");
+
 	const uint64_t start_frames = g_frames ? g_frames() : 0;
 	core->set_running(self, 1);
 	Pump(static_cast<DWORD>(seconds) * 500);
@@ -174,10 +235,16 @@ static bool RunRound(const NacreCore* core, HWND hwnd, const char* disc, const c
 	// Pause must stop frame production; resume must restart it.
 	core->set_running(self, 0);
 	const uint64_t paused_at = g_frames ? g_frames() : 0;
-	Pump(1000);
+	Pump(100);
+	core->audio_clear(self); // as the frontend does on stop
+	const uint64_t audio_paused_at = g_audio_frames;
+	Pump(900);
 	const uint64_t paused_after = g_frames ? g_frames() : 0;
-	std::printf("  %llu frames while paused 1s\n", static_cast<unsigned long long>(paused_after - paused_at));
+	const uint64_t audio_while_paused = g_audio_frames - audio_paused_at;
+	std::printf("  %llu frames, %llu audio frames while paused 1s\n",
+		static_cast<unsigned long long>(paused_after - paused_at), static_cast<unsigned long long>(audio_while_paused));
 	Check(paused_after - paused_at <= 2, "pause stops frames");
+	Check(audio_while_paused <= 256, "pause stops audio");
 	core->set_running(self, 1);
 
 	// Exercise input: tap Start.
@@ -185,7 +252,20 @@ static bool RunRound(const NacreCore* core, HWND hwnd, const char* disc, const c
 	Pump(200);
 	core->set_pad(self, 0, 0);
 
+	// Second half: past boot and shader warm-up, so emulation should be at full
+	// speed and audio should arrive at about audio_rate frames per wall second.
+	const uint64_t audio_start = g_audio_frames;
+	g_audio_peak = 0;
+	g_audio_record = capture && *capture;
+	const DWORD audio_t0 = GetTickCount();
 	Pump(static_cast<DWORD>(seconds) * 500);
+	const double audio_secs = (GetTickCount() - audio_t0) / 1000.0;
+	g_audio_record = false;
+	const double audio_per_sec = static_cast<double>(g_audio_frames - audio_start) / audio_secs;
+	std::printf("  %.0f audio frames per second (%.0f%% of audio_rate), peak %d\n", audio_per_sec,
+		100.0 * audio_per_sec / audio_rate, g_audio_peak);
+	Check(audio_per_sec > audio_rate * 0.85 && audio_per_sec < audio_rate * 1.15, "audio arrives at audio_rate");
+	Check(g_audio_peak > 328, "audio is not silent"); // above -40 dBFS
 	const uint64_t end = g_frames ? g_frames() : 0;
 	std::printf("  %llu frames in total\n", static_cast<unsigned long long>(end - start_frames));
 	Check(end > paused_after, "resume restarts frames");
@@ -201,8 +281,16 @@ static bool RunRound(const NacreCore* core, HWND hwnd, const char* disc, const c
 		std::printf("  %s\n", e);
 
 	if (capture && *capture)
+	{
 		Check(SaveCapture(hwnd, capture), "capture shows an image");
+		std::string wav = capture;
+		const size_t dot = wav.find_last_of('.');
+		wav = (dot == std::string::npos ? wav : wav.substr(0, dot)) + ".wav";
+		Check(SaveWav(wav, g_audio_recorded, audio_rate), "audio written");
+		std::printf("  %s (%.1f s)\n", wav.c_str(), g_audio_recorded.size() / 2.0 / audio_rate);
+	}
 
+	g_self = nullptr;
 	core->destroy(self);
 	Check(true, "destroy returned");
 	return true;

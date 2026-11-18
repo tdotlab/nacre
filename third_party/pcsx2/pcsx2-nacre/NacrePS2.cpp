@@ -47,12 +47,14 @@
 #include "pcsx2/GS.h"
 #include "pcsx2/GameList.h"
 #include "pcsx2/Host.h"
+#include "pcsx2/Host/AudioStream.h"
 #include "pcsx2/ImGui/FullscreenUI.h"
 #include "pcsx2/ImGui/ImGuiFullscreen.h"
 #include "pcsx2/ImGui/ImGuiManager.h"
 #include "pcsx2/Input/InputManager.h"
 #include "pcsx2/MTGS.h"
 #include "pcsx2/PerformanceMetrics.h"
+#include "pcsx2/SPU2/spu2.h"
 #include "pcsx2/SIO/Pad/Pad.h"
 #include "pcsx2/SIO/Pad/PadDualshock2.h"
 #include "pcsx2/VMManager.h"
@@ -106,6 +108,8 @@ namespace
 	std::atomic<uint64_t> s_frames_presented{0};
 	unsigned s_speed_percent = 100;
 	uint32_t s_pad_buttons[2] = {};
+
+	std::unique_ptr<AudioStream> CreateAudioStream(u32 sample_rate); // SPU2's output, see Audio below
 
 	void Wake()
 	{
@@ -296,7 +300,14 @@ namespace
 		Pad::ClearPortBindings(si, 0);
 		Pad::ClearPortBindings(si, 1);
 		si.ClearSection("Hotkeys");
-		si.SetStringValue("SPU2/Output", "Backend", "Null"); // replaced by a Nacre backend later
+		// SPU2's stream comes from NacreAudioStream (SPU2::SetOutputStreamFactory); the
+		// backend setting is only the fallback if that ever fails. Full volume while
+		// fast-forwarding too: Nacre decides what to play at other speeds.
+		si.SetStringValue("SPU2/Output", "Backend", "Null");
+		si.SetStringValue("SPU2/Output", "SyncMode", "Disabled");
+		si.SetIntValue("SPU2/Output", "StandardVolume", 100);
+		si.SetIntValue("SPU2/Output", "FastForwardVolume", 100);
+		si.SetBoolValue("SPU2/Output", "OutputMuted", false);
 
 		// No UI on top of the game, no prompts.
 		si.SetBoolValue("UI", "ConfirmShutdown", false);
@@ -510,6 +521,7 @@ namespace
 			return nullptr;
 		}
 		ApplyBaseSettings(inst->host);
+		SPU2::SetOutputStreamFactory(&CreateAudioStream);
 
 		{
 			std::lock_guard lock(s_text_mutex);
@@ -700,9 +712,124 @@ namespace
 		return 1;
 	}
 
-	unsigned AudioRate(void*) { return 48000; }
-	size_t AudioRead(void*, int16_t*, size_t) { return 0; } // Nacre audio backend: next milestone
-	void AudioClear(void*) {}
+	// ---- Audio ----------------------------------------------------------------
+	//
+	// SPU2 writes float stereo into an AudioStream on the CPU thread; normally a cubeb
+	// or SDL device pulls from it. Here the host pulls instead: audio_read drains the
+	// same ring on the host's thread and converts to int16. One writer, one reader, the
+	// ring's own atomics, the same arrangement as PCSX2's device backends. No time
+	// stretching or resampling: Nacre's audio output handles rate and queue depth.
+
+	class NacreAudioStream;
+
+	std::mutex s_audio_mutex; // guards s_audio_stream's lifetime, not the ring
+	NacreAudioStream* s_audio_stream = nullptr;
+	std::atomic<unsigned> s_audio_rate{SPU2::SAMPLE_RATE};
+
+	class NacreAudioStream final : public AudioStream
+	{
+	public:
+		// Ring capacity. The host sees at most KEEP_DIVISOR-th of a second; anything
+		// older is dropped on read, which is the drop-oldest policy the interface asks for.
+		static constexpr u16 RING_MS = 500;
+		static constexpr u32 KEEP_DIVISOR = 3;
+
+		static std::unique_ptr<AudioStream> Create(u32 sample_rate)
+		{
+			AudioStreamParameters params;
+			params.expansion_mode = AudioExpansionMode::Disabled;
+			params.buffer_ms = RING_MS;
+
+			std::unique_ptr<NacreAudioStream> stream(new NacreAudioStream(sample_rate, params));
+			stream->BaseInitialize(&StereoSampleReaderImpl, false);
+
+			std::lock_guard lock(s_audio_mutex);
+			s_audio_stream = stream.get();
+			s_audio_rate.store(sample_rate);
+			return stream;
+		}
+
+		~NacreAudioStream() override
+		{
+			std::lock_guard lock(s_audio_mutex);
+			if (s_audio_stream == this)
+				s_audio_stream = nullptr;
+		}
+
+		// Reader side; call with s_audio_mutex held.
+		size_t Read(int16_t* out, size_t max_frames)
+		{
+			u32 available = GetBufferedFramesRelaxed();
+			const u32 keep = GetSampleRate() / KEEP_DIVISOR;
+			if (available > keep)
+			{
+				Discard(available - keep);
+				available = keep;
+			}
+
+			// Never ask for more than is buffered: ReadFrames pads a short read with a
+			// crude resample of what it has, which Nacre does better with silence.
+			size_t remaining = std::min<size_t>(available, max_frames);
+			const size_t total = remaining;
+			while (remaining > 0)
+			{
+				const u32 n = static_cast<u32>(std::min<size_t>(remaining, SCRATCH_FRAMES));
+				ReadFrames(m_scratch, n);
+				for (u32 i = 0; i < n * 2; i++)
+				{
+					const float v = std::clamp(m_scratch[i], -1.0f, 1.0f);
+					*out++ = static_cast<int16_t>(v * 32767.0f);
+				}
+				remaining -= n;
+			}
+			return total;
+		}
+
+		// Reader side: drop what is buffered by consuming it, so only the reader moves
+		// the read position. (AudioStream::EmptyBuffer moves the write position and
+		// belongs to the writer's thread.)
+		void Clear() { Discard(GetBufferedFramesRelaxed()); }
+
+	private:
+		static constexpr u32 SCRATCH_FRAMES = 1024;
+
+		NacreAudioStream(u32 sample_rate, const AudioStreamParameters& params)
+			: AudioStream(sample_rate, params)
+		{
+		}
+
+		void Discard(u32 frames)
+		{
+			while (frames > 0)
+			{
+				const u32 n = std::min(frames, SCRATCH_FRAMES);
+				ReadFrames(m_scratch, n);
+				frames -= n;
+			}
+		}
+
+		float m_scratch[SCRATCH_FRAMES * 2];
+	};
+
+	std::unique_ptr<AudioStream> CreateAudioStream(u32 sample_rate)
+	{
+		return NacreAudioStream::Create(sample_rate);
+	}
+
+	unsigned AudioRate(void*) { return s_audio_rate.load(); }
+
+	size_t AudioRead(void*, int16_t* stereo, size_t max_frames)
+	{
+		std::lock_guard lock(s_audio_mutex);
+		return (s_audio_stream && stereo) ? s_audio_stream->Read(stereo, max_frames) : 0;
+	}
+
+	void AudioClear(void*)
+	{
+		std::lock_guard lock(s_audio_mutex);
+		if (s_audio_stream)
+			s_audio_stream->Clear();
+	}
 
 	// DualShock 2 bind for each Nacre pad button.
 	constexpr u32 PAD_BINDS[NACRE_PAD_BUTTON_COUNT] = {
