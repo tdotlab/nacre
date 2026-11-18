@@ -60,6 +60,11 @@ bool IsRunningPSXMode();
 /// Returns the current sample rate the SPU2 is operating at.
 u32 GetConsoleSampleRate();
 
+/// Nacre: lets an embedding host supply the output stream instead of a cubeb/SDL device.
+/// When set, it replaces the configured backend for every stream SPU2 creates; nullptr restores it.
+using OutputStreamFactory = std::unique_ptr<AudioStream> (*)(u32 sample_rate);
+void SetOutputStreamFactory(OutputStreamFactory factory);
+
 /// Tells SPU2 to forward audio packets to GSCapture.
 void SetAudioCaptureActive(bool active);
 bool IsAudioCaptureActive();

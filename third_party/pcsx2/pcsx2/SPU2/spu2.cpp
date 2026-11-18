@@ -31,12 +31,18 @@ static bool s_psxmode = false;
 static bool s_output_muted = false;
 
 static std::unique_ptr<AudioStream> s_output_stream;
+static SPU2::OutputStreamFactory s_output_stream_factory = nullptr; // Nacre
 static std::array<float, AudioStream::CHUNK_SIZE * 2> s_current_chunk;
 static u32 s_current_chunk_pos;
 static u32 s_standard_volume = 0;
 static u32 s_fast_forward_volume = 0;
 
 float DCFilterIn[2], DCFilterOut[2];
+
+void SPU2::SetOutputStreamFactory(OutputStreamFactory factory)
+{
+	s_output_stream_factory = factory;
+}
 
 u32 SPU2::GetConsoleSampleRate()
 {
@@ -117,8 +123,11 @@ void SPU2::CreateOutputStream()
 	s_output_stream.reset();
 
 	Error error;
-	s_output_stream = AudioStream::CreateStream(EmuConfig.SPU2.Backend, sample_rate, EmuConfig.SPU2.StreamParameters,
-		EmuConfig.SPU2.DriverName.c_str(), EmuConfig.SPU2.DeviceName.c_str(), EmuConfig.SPU2.IsTimeStretchEnabled(), &error);
+	if (s_output_stream_factory)
+		s_output_stream = s_output_stream_factory(sample_rate);
+	else
+		s_output_stream = AudioStream::CreateStream(EmuConfig.SPU2.Backend, sample_rate, EmuConfig.SPU2.StreamParameters,
+			EmuConfig.SPU2.DriverName.c_str(), EmuConfig.SPU2.DeviceName.c_str(), EmuConfig.SPU2.IsTimeStretchEnabled(), &error);
 	if (!s_output_stream)
 	{
 		Host::ReportErrorAsync("Error",
