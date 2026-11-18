@@ -31,7 +31,7 @@ to the PCSX2 project.
 | `NACRE_CORE_NATIVE_VIDEO`, `attach_surface(NacreSurface)` | `Host::AcquireRenderWindow` returns a `WindowInfo`. The fields line up: kind→`type`, handle→`window_handle`, display→`display_connection`, width/height/scale→`surface_*`. On Mac PCSX2 makes its own `CAMetalLayer` on the NSView when `surface_handle` is empty. A re-attach after resize maps to `MTGS::ResizeDisplayWindow(width, height, scale)` |
 | `wake` | Errors and VM stop (`Host::OnVMDestroyed`, `ReportErrorAsync`). Frames don't need it: the GS thread presents on its own |
 | `set_speed` | `VMManager::SetLimiterMode`: 100% is `Nominal`, fast-forward is `Turbo`, slow is `Slomo` (their percentages are settings) |
-| `audio_rate`, `audio_read` | **Gap.** SPU2 writes float stereo into an `AudioStream` that owns a cubeb or SDL device. Needs a small PCSX2 patch: a Nacre backend that resamples nothing and fills a ring the adapter converts to int16. Keeps mute, speed and the 40-150 ms queue policy in Nacre |
+| `audio_rate`, `audio_read`, `audio_clear` | SPU2 writes float stereo into an `AudioStream`. A PCSX2 patch (`SPU2::SetOutputStreamFactory`) lets the adapter supply its own: `NacreAudioStream`, with no device, stretching or resampling. `audio_read` drains its ring on the host's thread and converts to int16; anything older than a third of a second is dropped on read. Mute, speed and the 40-150 ms queue policy stay in Nacre |
 | `set_pad`, `set_axis` | `Pad::SetControllerState(port, bind, value)` with the DualShock 2 binds. All 16 `NACRE_PAD_*` buttons exist on the DS2 (South=Cross, East=Circle, West=Square, North=Triangle). Sticks map to `PAD_L_*`/`PAD_R_*` as half-axes. PCSX2's own `InputManager` sources stay off so it never opens gamepads behind Nacre's back |
 | `state_size/save/load` | **Mismatch.** PCSX2 states are zip files written asynchronously to a path (`VMManager::SaveState(filename, ...)`). The adapter can save to a temp file and read it back, which works but is slow. Better: give the session a path-based state hook for cores that write their own files |
 | `set_option` | Writes into an `INISettingsInterface` the adapter owns (renderer, upscale, etc.) then `VMManager::ApplySettings` |
@@ -57,7 +57,8 @@ The adapter is `third_party/pcsx2/pcsx2-nacre/`, built by PCSX2's own CMake when
 - `nacre_ps2.dll`: PCSX2 plus the adapter. Exports `nacre_plugin_core()`, which
   returns the `NacreCore` table, and `nacre_ps2_frames_presented()` for tests.
 - `nacre_ps2_smoke.exe`: loads the DLL like a frontend, boots a disc in a Win32
-  window, checks frames, pause/resume and teardown, and saves a capture.
+  window, checks frames, audio rate and level, pause/resume and teardown, and
+  saves a capture plus the audio as a `.wav` beside it.
 - PCSX2's runtime DLLs (SDL3, zstd, shaderc, ffmpeg, ...), `D3D12/` and `resources/`.
 
 The core is a runtime plugin rather than linked into Nacre because the two
@@ -97,8 +98,8 @@ than working around it. To keep monthly upstream merges mechanical:
   update that file.
 - Nacre's changes to PCSX2 sit on top of upstream as small commits prefixed
   `pcsx2:`, so a conflict names the patch it hit. New files go in
-  `pcsx2-nacre/`; edits to upstream files stay minimal (today: one `option` and
-  `add_subdirectory` in the top-level `CMakeLists.txt`).
+  `pcsx2-nacre/`; edits to upstream files stay minimal and are listed under
+  Status.
 - Merges target a PCSX2 nightly tag, which has passed their CI, not an arbitrary
   commit.
 - A merge is done when the PS2 smoke test passes: the test disc boots and produces
@@ -109,27 +110,33 @@ or dispatches an agent to do the merge.
 
 ## Status
 
-**P1 done (2026-11-18): the adapter boots games through `NacreCore`.** On the
+**P1 done (2026-11-18): the adapter boots games through `NacreCore`, with audio.** On the
 owner's Windows machine (i5-8400, GTX 1070), `nacre_ps2_smoke` boots San Andreas
 (SLUS-20946) with the SCPH-70012 USA BIOS, picked by region from a folder of
 three. It passes every check over three create/run/pause/destroy rounds in one
 process. Steady state is ~60 presented frames per second on D3D12 after a few
 seconds of shader compilation. Pause stops frames within a vsync, resume
 restarts them, and a capture at 40 s shows the intro movie with no PCSX2 UI.
-No Nacre frontend loads the plugin yet; that is the next milestone.
+Audio drained the way the desktop frontend drains it arrives at 100% of 48 kHz
+once boot is past, stops while paused, and the recorded intro is real sound
+(about -18 dBFS of music and speech, stereo, no clipping or clicks). Nobody has
+listened to it yet: no Nacre frontend loads the plugin, which is the next
+milestone.
 
 The adapter covers threaded run/pause on its own CPU thread (a command queue
 drained at vsync), native-surface attach and resize, DualShock 2 buttons and
 sticks, speed (`Nominal`/`Turbo`/`Slomo`), title, BIOS choice, and the options
-`bios`, `renderer`, `upscale`, `fast_boot` and `osd`. Audio is stubbed
-(`SPU2/Output` is `Null`), states and memory-card mapping are not wired, and
-PCSX2's own on-screen messages are off by default.
+`bios`, `renderer`, `upscale`, `fast_boot` and `osd`, and audio through
+`audio_read`. States and memory-card mapping are not wired, and PCSX2's own
+on-screen messages are off by default.
 
 Changes to upstream PCSX2 files so far:
 
 - `CMakeLists.txt`: the `ENABLE_NACRE_CORE` option.
 - `pcsx2/vtlb.cpp`: install the page-fault handler once per process. Upstream
   assumes one VM-memory allocation per process and asserts on the second boot.
+- `pcsx2/SPU2/spu2.h`, `spu2.cpp`: `SPU2::SetOutputStreamFactory`, a host-supplied
+  output stream that replaces the configured backend.
 
 Known issues:
 
@@ -139,11 +146,13 @@ Known issues:
   Automation. A host hook that logs and stops the core would be better.
 - PCSX2's base settings layer can be set once per process, so the adapter keeps
   one `MemorySettingsInterface` and resets it on each `create`.
+- PCSX2 empties the audio ring from the CPU thread when the speed changes
+  (`SPU2::OnTargetSpeedChanged`), which races the reader as it does with
+  PCSX2's own device backends. Worst case is one burst of stale audio.
 - Not checked: sustained play, memory growth over many rounds, Vulkan and
-  OpenGL, other games.
+  OpenGL, other games, PSX-mode (44.1 kHz) audio.
 
-Next, in order: a Nacre `AudioStream` backend feeding `audio_read`; Windows
-frontend plugin loading and `attach_surface` (a child HWND in the display well),
+Next, in order: Windows frontend plugin loading and `attach_surface` (a child HWND in the display well),
 with `system_dir` and `save_dir` wiring; memory cards in `save_dir`; the
 path-based save-state hook; Mac and Linux.
 
