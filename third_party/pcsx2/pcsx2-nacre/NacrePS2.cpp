@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdarg>
 #include <cstring>
@@ -162,6 +163,29 @@ namespace
 	}
 
 	// Queue work for the CPU thread. With block, wait until it ran.
+	// The UI thread owns the window PCSX2 presents to, and DXGI sends that thread messages
+	// while the GS thread creates, resizes or releases a swap chain. A UI thread that waits
+	// on the VM without taking those messages stalls until DXGI gives up (seconds), so every
+	// wait here lets sent messages through. Posted messages stay queued: nothing re-enters
+	// the frontend beyond what a SendMessage from another thread would do anyway.
+	void TakeSentMessages()
+	{
+#ifdef _WIN32
+		MSG msg;
+		PeekMessageW(&msg, nullptr, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);
+#endif
+	}
+
+	void JoinTakingMessages(std::thread& thread)
+	{
+#ifdef _WIN32
+		const HANDLE handle = static_cast<HANDLE>(thread.native_handle());
+		while (MsgWaitForMultipleObjectsEx(1, &handle, INFINITE, QS_SENDMESSAGE, 0) == WAIT_OBJECT_0 + 1)
+			TakeSentMessages();
+#endif
+		thread.join();
+	}
+
 	void QueueOnCPU(std::function<void()> fn, bool block)
 	{
 		if (OnCPUThread())
@@ -205,7 +229,12 @@ namespace
 		}
 		s_queue_cv.notify_one();
 		std::unique_lock dlock(done_mutex);
-		done_cv.wait(dlock, [&]() { return done; });
+		while (!done_cv.wait_for(dlock, std::chrono::milliseconds(5), [&]() { return done; }))
+		{
+			dlock.unlock();
+			TakeSentMessages();
+			dlock.lock();
+		}
 	}
 
 	// ---- Folders and settings -----------------------------------------------
@@ -236,9 +265,10 @@ namespace
 			return false;
 		}
 
-		// Everything PCSX2 writes (memory cards, shader cache, logs) goes under the
-		// host's save directory, or beside the DLL when the host gives none.
-		EmuFolders::DataRoot = host.save_dir && *host.save_dir ? std::string(host.save_dir) :
+		// Everything PCSX2 writes (memory cards, shader cache, logs) goes under ps2/ in
+		// the host's save directory, which other cores share, or beside the DLL when
+		// the host gives none.
+		EmuFolders::DataRoot = host.save_dir && *host.save_dir ? Path::Combine(host.save_dir, "ps2") :
 		                                                          Path::Combine(EmuFolders::AppRoot, "data");
 		EmuFolders::Settings = Path::Combine(EmuFolders::DataRoot, "inis");
 		Error err;
@@ -466,7 +496,7 @@ namespace
 		}
 		s_queue_cv.notify_one();
 		HostLog(NACRE_LOG_DEBUG, "PS2: stopping CPU thread");
-		s_cpu_thread.join();
+		JoinTakingMessages(s_cpu_thread);
 		HostLog(NACRE_LOG_DEBUG, "PS2: CPU thread joined");
 		s_cpu_thread_exit = false;
 		s_vm_started = false;
