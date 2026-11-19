@@ -32,6 +32,8 @@ struct NacreSession {
     unsigned speed;
     Option options[MAX_OPTIONS];
     int option_count;
+    NacreSurface surface;
+    int has_surface;
 };
 
 static char *copy_text(const char *text) {
@@ -214,6 +216,21 @@ int nacre_session_open(NacreSession *session, const NacreCore *core, const char 
         return 0;
     }
 
+    /* A native-video core gets its surface before it first runs. */
+    if (core->flags & NACRE_CORE_NATIVE_VIDEO) {
+        int attached = 0;
+        if (!session->has_surface)
+            snprintf(error, error_capacity, "%s games need a window to draw in.", core->name);
+        else if (!(attached = core->attach_surface(self, &session->surface, error, error_capacity)) &&
+                 !error[0])
+            snprintf(error, error_capacity, "%s couldn't use this window.", core->name);
+        if (!attached) {
+            core->destroy(self);
+            free(owned_path);
+            return 0;
+        }
+    }
+
     nacre_session_close(session); /* writes the old game's save */
     session->core = core;
     session->self = self;
@@ -230,6 +247,18 @@ void nacre_session_restart(NacreSession *session) {
     session->core->audio_clear(session->self);
     session->core->set_running(session->self, session->running);
     session->fault_reported = 0;
+}
+
+int nacre_session_set_surface(NacreSession *session, const NacreSurface *surface, char *error,
+                              size_t error_capacity) {
+    session->has_surface = surface != NULL;
+    if (surface) session->surface = *surface;
+    if (error_capacity) error[0] = '\0';
+    if (!session->self || !(session->core->flags & NACRE_CORE_NATIVE_VIDEO)) return 1;
+    if (session->core->attach_surface(session->self, surface, error, error_capacity)) return 1;
+    if (error_capacity && !error[0]) snprintf(error, error_capacity, "%s couldn't use this window.",
+                                              session->core->name);
+    return 0;
 }
 
 void nacre_session_set_running(NacreSession *session, int running) {

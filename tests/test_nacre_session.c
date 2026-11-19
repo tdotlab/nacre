@@ -309,6 +309,8 @@ static void option_and_run_checks(void) {
 typedef struct {
     int fail_load;
     const char *fault;
+    unsigned surface_width; /* 0 while detached */
+    int ran_detached;
 } Mock;
 
 static int live;
@@ -336,10 +338,20 @@ static int mock_load(void *s, const NacreContent *ct, char *e, size_t c) {
 }
 static void mock_void(void *s) { ((Mock *)s)->fault = NULL; }
 static void mock_audio_clear(void *s) { (void)s; }
-static void mock_int(void *s, int v) { (void)s; (void)v; }
 static void mock_speed(void *s, unsigned v) { (void)s; (void)v; }
 static const char *mock_error(void *s) { return ((Mock *)s)->fault; }
-static int mock_attach(void *s, const NacreSurface *sf, char *e, size_t c) { (void)s; (void)sf; (void)e; (void)c; return 1; }
+static int refuse_surface;
+static int mock_attach(void *s, const NacreSurface *sf, char *e, size_t c) {
+    if (refuse_surface) {
+        snprintf(e, c, "no swap chain");
+        return 0;
+    }
+    ((Mock *)s)->surface_width = sf ? sf->width : 0;
+    return 1;
+}
+static void mock_running(void *s, int v) {
+    if (v && !((Mock *)s)->surface_width) ((Mock *)s)->ran_detached = 1;
+}
 static unsigned mock_rate(void *s) { (void)s; return 48000; }
 static size_t mock_read(void *s, int16_t *o, size_t m) { (void)s; (void)o; (void)m; return 0; }
 static int mock_probe(const uint8_t *h, size_t hs, size_t s, const char *p) { (void)h; (void)hs; (void)s; (void)p; return 0; }
@@ -356,7 +368,7 @@ static NacreCore mock_core(void) {
     core.destroy = mock_destroy;
     core.load = mock_load;
     core.reset = mock_void;
-    core.set_running = mock_int;
+    core.set_running = mock_running;
     core.set_speed = mock_speed;
     core.error = mock_error;
     core.attach_surface = mock_attach;
@@ -369,11 +381,26 @@ static NacreCore mock_core(void) {
 static void singleton_checks(void) {
     char error[256];
     NacreCore mock = mock_core();
+    NacreSurface surface = {NACRE_SURFACE_WIN32_HWND, &surface, NULL, 640, 480, 1.0f};
     NacreSession *s = session_new(1);
     wipe();
     CHECK(!nacre_session_open(s, &mock, NULL, NULL, 0, error, sizeof error) && strstr(error, "from a file"));
+    /* A native-video core needs somewhere to draw, given before it first runs. */
+    CHECK(!nacre_session_open(s, &mock, "/d/one.iso", NULL, 0, error, sizeof error) &&
+          strstr(error, "window") && live == 0);
+    CHECK(nacre_session_set_surface(s, &surface, error, sizeof error));
+    refuse_surface = 1;
+    CHECK(!nacre_session_open(s, &mock, "/d/one.iso", NULL, 0, error, sizeof error) &&
+          !strcmp(error, "no swap chain") && live == 0);
+    refuse_surface = 0;
     CHECK(nacre_session_open(s, &mock, "/d/one.iso", NULL, 0, error, sizeof error));
     CHECK(live == 1);
+    CHECK(((Mock *)nacre_session_instance(s))->surface_width == 640);
+    CHECK(!((Mock *)nacre_session_instance(s))->ran_detached);
+    /* A resize reaches the open game. */
+    surface.width = 800;
+    CHECK(nacre_session_set_surface(s, &surface, error, sizeof error));
+    CHECK(((Mock *)nacre_session_instance(s))->surface_width == 800);
     /* The old instance is shut down before the new one is made. */
     CHECK(nacre_session_open(s, &mock, "/d/two.iso", NULL, 0, error, sizeof error));
     CHECK(live == 1);

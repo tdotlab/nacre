@@ -67,6 +67,12 @@ void nacre_session_close(NacreSession *session);
 /* Power cycle the current game; the battery save is written first. */
 void nacre_session_restart(NacreSession *session);
 
+/* Where native-video cores present (copied; NULL for none). Each such game gets
+ * it after loading and before it first runs, and one open now gets it at once;
+ * call again with the new size after a resize. Opening a native-video game with
+ * no surface fails. Returns 0 with a message if the open core refused it. */
+int nacre_session_set_surface(NacreSession *session, const NacreSurface *surface, char *error,
+                              size_t error_capacity);
 /* Whether the user lets the game run (pause, menus, focus): applied now and to
  * every game opened later. */
 void nacre_session_set_running(NacreSession *session, int running);
