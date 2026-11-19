@@ -233,6 +233,16 @@ make test                           # includes tests/test_gb (116 ROM checks + b
 
 `tests/test_gb --run ROM --seconds N --dump out.pgm --press start:9` runs one ROM headlessly. It holds a button at a given time and writes the final frame, which is how real games are smoke-tested.
 
+## PS2 core (Windows, experimental)
+
+A PS2 core built on [PCSX2](https://github.com/PCSX2/pcsx2) lives in
+`third_party/pcsx2/` as a separate plugin, `nacre_ps2.dll`. The normal build does
+not touch it. The Windows app loads plugins from `cores\<name>\` beside
+`Nacre.exe` or from the folders in `NACRE_CORE_DIRS`, then opens PS2 disc images
+(`.iso`, `.chd`, `.cso`) like any other game. You supply a PS2 BIOS: point
+File > System Files Folder at the folder that holds it. Build steps, status and
+known issues are in [docs/PS2.md](docs/PS2.md).
+
 ## License
 
 Copyright (c) 2026 tdotlab. Nacre is free software: you can redistribute it and/or

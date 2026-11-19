@@ -43,10 +43,35 @@ Two changes to the Nacre interface, both additive:
 
 - A path-based save-state hook (core writes and reads the state file itself), used
   by the session when present. PCSX2 states are tens of megabytes and already
-  compressed; copying them through a buffer adds nothing.
-- Native-surface frontends. No frontend calls `attach_surface` yet. The Windows
-  frontend gets a child HWND inside the display well and forwards resizes; Mac
-  gets an NSView. This is the next milestone, built against PCSX2 itself.
+  compressed; copying them through a buffer adds nothing. Not built yet.
+- Native-surface frontends. Done on Windows: `nacre_session_set_surface` stores
+  where native-video cores present, the session attaches it after a load and
+  before the first `set_running`, and refuses to open such a game without one.
+  Mac (an NSView) and Linux are not built.
+
+## Windows frontend
+
+`Nacre.exe` loads plugins at startup from `<exe folder>\cores\<name>\nacre_*.dll`
+and from each folder in `NACRE_CORE_DIRS` (separated by `;`). Built-in cores stay
+first in detection order. A plugin that fails to load is logged and skipped.
+
+For a native-video game the frontend shows a child window (`NacreDisplay`) in the
+display well, fitted to 4:3, and passes it to the session; every resize, DPI
+change and full-screen switch passes the new size. The child is hidden for
+software-video cores. Core wakeups (errors, title changes, VM start/stop) arrive
+as a posted message, coalesced, and run a normal tick.
+
+Folders the core sees: `system_dir` is the folder chosen with File > System
+Files Folder (stored as `systemDir`), else `%LOCALAPPDATA%\Nacre\System`, which
+is created when a plugin needs system files. The PS2 core looks for BIOS images
+there. `save_dir` is `%LOCALAPPDATA%\Nacre\Data`; PCSX2 keeps its data under
+`ps2\` in it (logs, cache, and later memory cards).
+
+The UI thread owns the display window, and DXGI sends it messages while the GS
+thread creates, resizes or releases a swap chain. Every wait the adapter does on
+the UI thread lets those sent messages through (`MsgWaitForMultipleObjectsEx`
+with `QS_SENDMESSAGE`). Before that, closing a game after a resize and a
+full-screen switch stalled for 5 to 13 seconds.
 
 ## Build
 
@@ -119,9 +144,16 @@ seconds of shader compilation. Pause stops frames within a vsync, resume
 restarts them, and a capture at 40 s shows the intro movie with no PCSX2 UI.
 Audio drained the way the desktop frontend drains it arrives at 100% of 48 kHz
 once boot is past, stops while paused, and the recorded intro is real sound
-(about -18 dBFS of music and speech, stereo, no clipping or clicks). Nobody has
-listened to it yet: no Nacre frontend loads the plugin, which is the next
-milestone.
+(about -18 dBFS of music and speech, stereo, no clipping or clicks).
+
+**P2 done on Windows (2026-11-19): Nacre.exe plays PS2 discs.** Opening the San
+Andreas ISO in the real app boots it inside the display well, with the header
+showing the system and the game title. On the same machine, driven by
+`tools/junk/pcsx2-spike/app-ps2.ps1` and `app-switch.ps1` (muted): the picture
+follows a window resize and full screen, stays still while paused, switching to
+the welcome demo takes about 310 ms after any mix of pause, resize and full
+screen, and the app closes in about 150 ms with exit code 0. Nobody has played it
+with a controller or listened to it through the app yet.
 
 The adapter covers threaded run/pause on its own CPU thread (a command queue
 drained at vsync), native-surface attach and resize, DualShock 2 buttons and
@@ -152,9 +184,13 @@ Known issues:
 - Not checked: sustained play, memory growth over many rounds, Vulkan and
   OpenGL, other games, PSX-mode (44.1 kHz) audio.
 
-Next, in order: Windows frontend plugin loading and `attach_surface` (a child HWND in the display well),
-with `system_dir` and `save_dir` wiring; memory cards in `save_dir`; the
-path-based save-state hook; Mac and Linux.
+- The plugin is not built by CI or shipped beside `Nacre.exe`; a local run needs
+  `NACRE_CORE_DIRS` or a copy under `cores\ps2\`.
+- PCSX2 logs that `resources/patches.zip` is missing, so game patches are off.
+- The palette control does nothing for PS2.
+
+Next, in order: memory cards in `save_dir`; the path-based save-state hook; an
+assert hook; packaging the plugin with the Windows build; Mac and Linux.
 
 Local build quirks for the dependency bundle, kept in
 `tools/source-code-of-open-source/pcsx2-local/` on the owner's machine:

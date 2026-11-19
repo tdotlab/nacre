@@ -19,12 +19,13 @@ audio devices.
 | `src/desktop/pad.c` | SDL3 gamepad layer shared by the Mac, Windows and Linux frontends |
 | `include/nacre_core.h`, `src/core/registry.c` | System-agnostic core interface (stepped or threaded cores, framebuffer or native-surface video, emulation-locked stereo audio, positional pad, battery saves, states, options) and the built-in core registry with probe-based detection |
 | `src/core/chip8_core.c`, `src/core/gb_core.c` | CHIP-8 and Game Boy behind the core interface |
-| `include/nacre_session.h`, `src/core/session.c` | One running game: core choice, candidate-swap open, sibling `.sav` with debounced writes, `.state1`..`.state4` slots, remembered per-core options; file I/O through host callbacks |
+| `include/nacre_session.h`, `src/core/session.c` | One running game: core choice, candidate-swap open, sibling `.sav` with debounced writes, `.state1`..`.state4` slots, remembered per-core options, the native-video surface (attached after load, before the first run); file I/O through host callbacks |
 | `src/desktop/audio_out.c` | SDL3 output for any core: one stream at the core's rate, speed as frequency ratio, 40-150 ms queue, silent fast-forward |
 | `tests/test_gb.c`, `tools/get-gb-test-roms.py` | ROM-driven core checks; headless run/dump/press tool |
 | `src/macos/main.m` | ARC-managed AppKit app: native menus/panels, drawn sidebar and display, rebinding sheet; runs every registered core through a session, with the same per-system look table as Windows |
 | `src/macos/Info.plist.in` | Mac identity, version, document associations, OS requirement |
-| `src/windows/main.cpp` | Win32 + GDI+ app: window, owner-drawn controls, menus, dialogs, drop target, registry prefs; runs every registered core through a session, with per-system looks (keypad or pad, speed in Hz or ×) keyed by core id |
+| `src/windows/main.cpp` | Win32 + GDI+ app: window, owner-drawn controls, menus, dialogs, drop target, registry prefs; runs every registered core through a session, with per-system looks (keypad or pad, speed in Hz or ×) keyed by core id; loads plugin cores (`cores\<name>\nacre_*.dll`, `NACRE_CORE_DIRS`) and gives native-video ones a child window in the display well |
+| `third_party/pcsx2/` | PCSX2 as a squashed git subtree; `pcsx2-nacre/` is the PS2 adapter, built as the `nacre_ps2.dll` plugin (see docs/PS2.md) |
 | `src/windows/branding.h` | Shell mark and icon geometry (same shapes as the Mac header), shared by the app and the icon tool |
 | `src/windows/nacre.rc.in`, `nacre.manifest` | Embedded icon and welcome ROM, version info; comctl32 v6, PerMonitorV2 DPI |
 | `tools/windows-icon.cpp` | Build-time generator of `Nacre.ico` (PNG frames, 16–256 px) |

@@ -14,9 +14,11 @@
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <shobjidl.h>
 #include <timeapi.h>
 
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -60,6 +62,7 @@ enum {
     IDM_SAVE_STATE,
     IDM_LOAD_STATE,
     IDM_CONTROLS,
+    IDM_SYSTEM_DIR,
     IDC_SPEED,
     IDC_PALETTE,
     IDM_SPEED_BASE = 300,   /* + index */
@@ -69,6 +72,7 @@ enum {
 };
 const UINT WM_NACRE_LOAD = WM_APP + 1;     /* lParam: heap std::wstring* */
 const UINT WM_NACRE_SNAPSHOT = WM_APP + 2; /* run the self-check and capture */
+const UINT WM_NACRE_WAKE = WM_APP + 3;     /* a threaded core has news (NacreHost.wake) */
 const UINT_PTR TIMER_TICK = 1;
 const UINT_PTR TIMER_SNAPSHOT = 2;
 const size_t MAX_CONTENT = 256u << 20; /* larger content must be a NEEDS_PATH core's */
@@ -120,6 +124,12 @@ struct App {
     NacreSession *session; /* the running game, whatever the system */
     AudioOut *audio;
     bool rom_bundled;      /* the welcome program: no path, nothing written */
+    std::vector<const NacreCore *> plugins; /* cores loaded from DLLs, after the built-ins */
+    /* UTF-8 folders every core is handed (NacreHost points at these buffers). */
+    char system_dir[1024], save_dir[1024];
+    HWND display;          /* child window over the well that native-video cores draw into */
+    unsigned surface_w, surface_h;
+    float surface_scale;
 
     int speed_choice;                  /* index into SPEED_PERCENT */
     uint32_t cpu_hz;             /* the clock for clock-speed systems */
@@ -161,6 +171,7 @@ struct App {
 };
 
 App g;
+std::atomic<bool> g_wake_posted; /* one WM_NACRE_WAKE in the queue at a time */
 
 /* ---- Small utilities --------------------------------------------------- */
 
@@ -367,6 +378,119 @@ void note_recent(const std::wstring &path) {
     save_recents();
 }
 
+/* ---- Plugin cores ------------------------------------------------------ */
+
+/* Cores too big or too different to build in (PS2) ship as DLLs, each in a folder
+ * of its own with everything it depends on: cores\<name>\nacre_<name>.dll beside
+ * Nacre.exe. NACRE_CORE_DIRS (folders separated by ';') names more folders, which
+ * is how a development build finds one. A plugin exports nacre_plugin_core(). */
+typedef const NacreCore *(*PluginEntry)(void);
+
+void plugin_log(const std::wstring &text) { OutputDebugStringW((L"Nacre: " + text + L"\n").c_str()); }
+
+const NacreCore *find_core(const char *id) {
+    const NacreCore *found = nacre_core_by_id(id);
+    for (const NacreCore *c : g.plugins)
+        if (!found && strcmp(c->id, id) == 0) found = c;
+    return found;
+}
+
+void load_plugin(const std::wstring &dll) {
+    /* Its dependencies resolve from its own folder, never from beside Nacre.exe. */
+    HMODULE module = LoadLibraryExW(dll.c_str(), NULL,
+                                    LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    if (!module) {
+        plugin_log(L"couldn't load " + dll + L" (Windows error " + std::to_wstring(GetLastError()) + L")");
+        return;
+    }
+    PluginEntry entry = reinterpret_cast<PluginEntry>(GetProcAddress(module, "nacre_plugin_core"));
+    const NacreCore *c = entry ? entry() : NULL;
+    char error[256] = "not a Nacre core";
+    if (!c || !nacre_core_validate(c, error, sizeof(error)) || find_core(c->id)) {
+        if (c && find_core(c->id)) snprintf(error, sizeof(error), "a core named %s is already loaded", c->id);
+        plugin_log(dll + L": " + widen(error));
+        FreeLibrary(module);
+        return;
+    }
+    plugin_log(L"loaded " + widen(c->name) + L" from " + dll);
+    g.plugins.push_back(c); /* stays loaded until the process ends */
+}
+
+void scan_plugin_folder(const std::wstring &folder) {
+    WIN32_FIND_DATAW found;
+    HANDLE search = FindFirstFileW((folder + L"\\nacre_*.dll").c_str(), &found);
+    if (search == INVALID_HANDLE_VALUE) return;
+    do {
+        if (!(found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) load_plugin(folder + L"\\" + found.cFileName);
+    } while (FindNextFileW(search, &found));
+    FindClose(search);
+}
+
+void load_plugins() {
+    wchar_t exe[MAX_PATH];
+    DWORD length = GetModuleFileNameW(NULL, exe, MAX_PATH);
+    std::wstring cores = std::wstring(exe, length);
+    cores = cores.substr(0, cores.find_last_of(L"\\/") + 1) + L"cores";
+    WIN32_FIND_DATAW found;
+    HANDLE search = FindFirstFileW((cores + L"\\*").c_str(), &found);
+    if (search != INVALID_HANDLE_VALUE) {
+        do {
+            if ((found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && found.cFileName[0] != L'.')
+                scan_plugin_folder(cores + L"\\" + found.cFileName);
+        } while (FindNextFileW(search, &found));
+        FindClose(search);
+    }
+    wchar_t extra[4096];
+    DWORD extra_length = GetEnvironmentVariableW(L"NACRE_CORE_DIRS", extra, 4096);
+    if (extra_length == 0 || extra_length >= 4096) return;
+    std::wstring list(extra, extra_length);
+    size_t start = 0;
+    while (start <= list.size()) {
+        size_t end = list.find(L';', start);
+        if (end == std::wstring::npos) end = list.size();
+        if (end > start) scan_plugin_folder(list.substr(start, end - start));
+        start = end + 1;
+    }
+}
+
+/* Built-in cores first, so they win probe ties, then the plugins. */
+std::vector<const NacreCore *> all_cores() {
+    std::vector<const NacreCore *> list;
+    for (const NacreCore *const *entry = nacre_cores(); *entry; entry++) list.push_back(*entry);
+    list.insert(list.end(), g.plugins.begin(), g.plugins.end());
+    return list;
+}
+
+/* The core with the highest probe score above 0, or NULL. */
+const NacreCore *detect_core(const uint8_t *head, size_t head_size, size_t size, const char *path) {
+    const NacreCore *best = NULL;
+    int best_score = 0;
+    for (const NacreCore *c : all_cores()) {
+        int score = c->probe(head, head_size, size, path);
+        if (score > best_score) {
+            best = c;
+            best_score = score;
+        }
+    }
+    return best;
+}
+
+/* The per-user folders cores get: system files (BIOS) and their own data. The
+ * system folder can be changed from the File menu. */
+void set_folder(char *out, const std::wstring &path) {
+    std::string utf8 = narrow(path);
+    if (utf8.size() >= sizeof(g.system_dir)) utf8.clear();
+    memcpy(out, utf8.c_str(), utf8.size() + 1);
+}
+
+std::wstring app_data_folder(const wchar_t *name) {
+    PWSTR base = NULL;
+    std::wstring path;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, NULL, &base))) path = std::wstring(base) + L"\\Nacre\\" + name;
+    CoTaskMemFree(base);
+    return path;
+}
+
 /* ---- The running game -------------------------------------------------- */
 
 const NacreCore *core() { return g.session ? nacre_session_core(g.session) : NULL; }
@@ -391,6 +515,12 @@ bool has_keypad() {
 bool has_pad() {
     const NacreCore *c = core();
     return c && c->set_pad;
+}
+
+/* The core draws into the display window itself instead of handing back frames. */
+bool native_video() {
+    const NacreCore *c = core();
+    return c && (c->flags & NACRE_CORE_NATIVE_VIDEO);
 }
 
 std::wstring content_path() {
@@ -688,8 +818,9 @@ void render(Graphics &gfx, const RECT &clip) {
             bool arrow = cap.button <= NACRE_PAD_RIGHT;
             const char *named = c && !arrow ? c->pad_labels[cap.button] : NULL;
             std::wstring label = named ? upper(widen(named)) : std::wstring(cap.fallback);
+            float size = cap.cols == 1 && label.size() > 3 ? 7.0f : cap.size;
             keycap(26.0f + cap.col * 44, 444.0f + cap.row * 39, cap.cols * 44 - 8, label.c_str(),
-                   (g.pad_buttons & NACRE_PAD_BIT(cap.button)) != 0, cap.size);
+                   (g.pad_buttons & NACRE_PAD_BIT(cap.button)) != 0, size);
         }
         draw_text(gfx, L"Rebind keys: Session ▸ Controls", 26, 610, 190, 18, 10, UI, 0x7F847A);
         hint_y = 628;
@@ -921,6 +1052,36 @@ void place(HWND control, float x, float y, float w, float h) {
                  SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
+/* The display window: a 4:3 area in the well (the core letterboxes other shapes
+ * itself), below the badges and above the well's label. Physical pixels. */
+RECT display_rect() {
+    LRect well = well_rect();
+    float s = g.scale;
+    float room_x = (well.x + 24.0f) * s, room_y = (well.y + 56.0f) * s;
+    float room_w = std::max((well.w - 48.0f) * s, 4.0f), room_h = std::max((well.h - 88.0f) * s, 3.0f);
+    float w = std::min(room_w, room_h * 4.0f / 3.0f), h = w * 3.0f / 4.0f;
+    LONG x = (LONG)std::lround(room_x + (room_w - w) / 2.0f), y = (LONG)std::lround(room_y + (room_h - h) / 2.0f);
+    return {x, y, x + (LONG)std::lround(w), y + (LONG)std::lround(h)};
+}
+
+/* Moves the display window over the well, shows it only while a native-video core
+ * runs, and lends the session its new size (which reaches the running core). */
+void place_display() {
+    if (!g.display || !g.session) return;
+    RECT r = display_rect();
+    unsigned w = (unsigned)std::max(r.right - r.left, 1L), h = (unsigned)std::max(r.bottom - r.top, 1L);
+    SetWindowPos(g.display, NULL, r.left, r.top, (int)w, (int)h,
+                 SWP_NOZORDER | SWP_NOACTIVATE | (native_video() ? SWP_SHOWWINDOW : SWP_HIDEWINDOW));
+    if (w == g.surface_w && h == g.surface_h && g.scale == g.surface_scale) return;
+    g.surface_w = w;
+    g.surface_h = h;
+    g.surface_scale = g.scale;
+    NacreSurface surface = {NACRE_SURFACE_WIN32_HWND, g.display, NULL, w, h, g.scale};
+    char error[256];
+    if (!nacre_session_set_surface(g.session, &surface, error, sizeof(error)))
+        OutputDebugStringW((L"Nacre: " + widen(error) + L"\n").c_str());
+}
+
 void layout() {
     float w = logical_w(), h = logical_h();
     place(g.open, 24, 148, 174, 34);
@@ -929,6 +1090,7 @@ void layout() {
     place(g.pause, 252, h - 88, 116, 34);
     place(g.restart, 380, h - 88, 108, 34);
     place(g.sound, w - 164, h - 88, 132, 34);
+    place_display();
 }
 
 /* Each kind of speed keeps its own choice; the speed control shows the current one. */
@@ -999,15 +1161,15 @@ bool pick_rom_path(std::wstring &out) {
         return spec;
     };
     std::string every;
-    for (const NacreCore *const *entry = nacre_cores(); *entry; entry++) {
+    for (const NacreCore *c : all_cores()) {
         if (!every.empty()) every += ';';
-        every += (*entry)->extensions;
+        every += c->extensions;
     }
     names.push_back(L"Games");
     specs.push_back(spec_for(every + ";gbc;rom;bin"));
-    for (const NacreCore *const *entry = nacre_cores(); *entry; entry++) {
-        names.push_back(widen((*entry)->name) + L" games");
-        specs.push_back(spec_for((*entry)->extensions));
+    for (const NacreCore *c : all_cores()) {
+        names.push_back(widen(c->name) + L" games");
+        specs.push_back(spec_for(c->extensions));
     }
     names.push_back(L"All files");
     specs.push_back(L"*.*");
@@ -1024,6 +1186,36 @@ bool pick_rom_path(std::wstring &out) {
     DWORD options = 0;
     dialog->GetOptions(&options);
     dialog->SetOptions(options | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST);
+    bool picked = false;
+    if (SUCCEEDED(dialog->Show(g.hwnd))) {
+        IShellItem *item = NULL;
+        if (SUCCEEDED(dialog->GetResult(&item))) {
+            PWSTR path = NULL;
+            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) {
+                out = path;
+                CoTaskMemFree(path);
+                picked = true;
+            }
+            item->Release();
+        }
+    }
+    dialog->Release();
+    return picked;
+}
+
+bool pick_folder(const wchar_t *title, const std::wstring &start, std::wstring &out) {
+    IFileOpenDialog *dialog = NULL;
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog))))
+        return false;
+    DWORD options = 0;
+    dialog->GetOptions(&options);
+    dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+    dialog->SetTitle(title);
+    IShellItem *folder = NULL;
+    if (!start.empty() && SUCCEEDED(SHCreateItemFromParsingName(start.c_str(), NULL, IID_PPV_ARGS(&folder)))) {
+        dialog->SetFolder(folder);
+        folder->Release();
+    }
     bool picked = false;
     if (SUCCEEDED(dialog->Show(g.hwnd))) {
         IShellItem *item = NULL;
@@ -1116,6 +1308,12 @@ void host_log(void *userdata, NacreLogLevel level, const char *message) {
     OutputDebugStringW((L"Nacre: " + widen(message) + L"\n").c_str());
 }
 
+/* Any thread: a threaded core has news (an error, a title). Only posts a note. */
+void host_wake(void *userdata) {
+    (void)userdata;
+    if (!g_wake_posted.exchange(true) && !PostMessageW(g.hwnd, WM_NACRE_WAKE, 0, 0)) g_wake_posted = false;
+}
+
 /* ---- Save states ------------------------------------------------------- */
 
 /* A short message in the footer that clears itself after a few seconds. */
@@ -1193,7 +1391,9 @@ void set_slot(int slot) {
 bool open_with(const NacreCore *forced, const char *path, const uint8_t *data, size_t size, bool bundled) {
     char error[256] = "";
     release_keys(); /* nothing held carries over to the next game */
-    if (!nacre_session_open(g.session, forced, path, data, size, error, sizeof(error))) {
+    bool opened = nacre_session_open(g.session, forced, path, data, size, error, sizeof(error)) != 0;
+    place_display(); /* shown for a native-video game, hidden otherwise */
+    if (!opened) {
         std::wstring message = sentence(error);
         if (ready()) message += L" Your current session has been kept.";
         show_alert(message);
@@ -1227,7 +1427,7 @@ void load_file(const std::wstring &path) {
         return;
     }
     std::string utf8 = narrow(path);
-    const NacreCore *found = nacre_core_detect(head.data(), head.size(), (size_t)total, utf8.c_str());
+    const NacreCore *found = detect_core(head.data(), head.size(), (size_t)total, utf8.c_str());
     if (!found) {
         show_alert(L"Nacre doesn't recognize that file as a game for any system it runs. Your current "
                    L"session has been kept.");
@@ -1276,6 +1476,24 @@ void open_rom() {
     SetFocus(g.hwnd);
     if (picked) load_file(path);
     update_controls();
+}
+
+/* Where cores look for BIOS and firmware files. Applies to the next game opened. */
+void choose_system_folder() {
+    if (g.dialog_open) return;
+    g.dialog_open = true;
+    release_keys();
+    pump_audio();
+    std::wstring folder;
+    bool picked = pick_folder(L"Folder with BIOS and firmware files", widen(g.system_dir), folder);
+    g.dialog_open = false;
+    g.previous = SDL_GetTicksNS();
+    if (picked) {
+        set_folder(g.system_dir, folder);
+        reg_set_string(L"systemDir", folder);
+        set_status(L"System files: " + folder);
+    }
+    SetFocus(g.hwnd);
 }
 
 void toggle_pause() {
@@ -1357,7 +1575,7 @@ void show_about() {
     release_keys();
     pump_audio();
     TaskDialog(g.hwnd, NULL, L"About Nacre", L"Nacre " NACRE_VERSION_W,
-               L"A small CHIP-8 and Game Boy machine.\nMade by tdotlab.\n\nFree software under the GNU GPL, "
+               L"A small machine for CHIP-8, Game Boy and, with its plugin, PS2 games.\nMade by tdotlab.\n\nFree software under the GNU GPL, "
                L"version 3 or later (see LICENSE).\nSound uses SDL3, bundled under its zlib license "
                L"(see THIRD_PARTY_NOTICES.txt).",
                TDCBF_OK_BUTTON, TD_INFORMATION_ICON, NULL);
@@ -1576,6 +1794,7 @@ void on_command(int id) {
     case IDM_SAVE_STATE: save_state(); SetFocus(g.hwnd); break;
     case IDM_LOAD_STATE: load_state(); SetFocus(g.hwnd); break;
     case IDM_CONTROLS: show_controls(); break;
+    case IDM_SYSTEM_DIR: choose_system_folder(); break;
     case IDCANCEL:
         if (g.fullscreen) toggle_fullscreen();
         break;
@@ -1991,6 +2210,8 @@ void build_menus() {
     g.recent_menu = CreatePopupMenu();
     AppendMenuW(file, MF_POPUP, (UINT_PTR)g.recent_menu, L"Open &Recent");
     AppendMenuW(file, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(file, MF_STRING, IDM_SYSTEM_DIR, L"System &Files Folder…");
+    AppendMenuW(file, MF_SEPARATOR, 0, NULL);
     AppendMenuW(file, MF_STRING, IDM_EXIT, L"E&xit\tCtrl+Q");
     AppendMenuW(g.menu, MF_POPUP, (UINT_PTR)file, L"&File");
 
@@ -2115,6 +2336,24 @@ bool restore_placement() {
     return SetWindowPlacement(g.hwnd, &placement) != 0;
 }
 
+/* The display window only lends its surface: the core draws, and clicks fall
+ * through to the main window. */
+LRESULT CALLBACK display_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    switch (message) {
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        BeginPaint(hwnd, &ps);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_NCHITTEST:
+        return HTTRANSPARENT;
+    }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
 LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     switch (message) {
     case WM_ERASEBKGND:
@@ -2202,6 +2441,11 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         g.snapshot_status = run_snapshot();
         DestroyWindow(hwnd);
         return 0;
+    case WM_NACRE_WAKE:
+        g_wake_posted = false;
+        tick(); /* notices a fault now rather than on the next timer */
+        invalidate_header();
+        return 0;
     case WM_NACRE_LOAD: {
         std::wstring *path = reinterpret_cast<std::wstring *>(lparam);
         load_file(*path);
@@ -2217,6 +2461,9 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         if (wparam && g.session) nacre_session_flush(g.session);
         return 0;
     case WM_DESTROY:
+        /* A native-video core presents into a child of this window: stop it while
+         * the window still exists. */
+        if (g.session && native_video()) nacre_session_close(g.session);
         KillTimer(hwnd, TIMER_TICK);
         RevokeDragDrop(hwnd);
         PostQuitMessage(g.snapshot_status);
@@ -2257,10 +2504,23 @@ bool initialize(int show) {
     if (!g.ephemeral) g.slot = (int)std::min<DWORD>(reg_dword(L"gbSlot", 0), (DWORD)(STATE_SLOTS - 1));
     if (!g.ephemeral) load_recents();
 
+    /* Plugin cores, and the folders every core gets. */
+    load_plugins();
+    std::wstring system_dir = g.ephemeral ? std::wstring() : reg_string(L"systemDir");
+    if (system_dir.empty()) system_dir = app_data_folder(L"System");
+    set_folder(g.system_dir, system_dir);
+    set_folder(g.save_dir, app_data_folder(L"Data"));
+    for (const NacreCore *c : g.plugins)
+        if ((c->flags & NACRE_CORE_NEEDS_SYSTEM_FILES) && !system_dir.empty())
+            SHCreateDirectoryExW(NULL, system_dir.c_str(), NULL); /* somewhere obvious to put a BIOS */
+
     /* The session runs whichever core a file picks; a snapshot run never writes. */
     NacreSessionIo io = {io_read, io_write, io_now, NULL};
     NacreHost host = {};
     host.log = host_log;
+    host.wake = host_wake;
+    host.system_dir = g.system_dir[0] ? g.system_dir : NULL;
+    host.save_dir = g.save_dir[0] ? g.save_dir : NULL;
     g.session = nacre_session_create(&io, &host, g.ephemeral ? 0 : 1);
     if (!g.session) return false;
     nacre_session_set_option(g.session, "chip8", "cpu_hz", std::to_string(g.cpu_hz).c_str());
@@ -2282,6 +2542,12 @@ bool initialize(int show) {
     cls.hIconSm = icon_small;
     cls.lpszClassName = L"NacreWindow";
     if (!RegisterClassExW(&cls)) return false;
+    WNDCLASSEXW display_cls = {sizeof(display_cls)};
+    display_cls.lpfnWndProc = display_proc;
+    display_cls.hInstance = g.instance;
+    display_cls.hCursor = LoadCursorW(NULL, IDC_ARROW);
+    display_cls.lpszClassName = L"NacreDisplay";
+    if (!RegisterClassExW(&display_cls)) return false;
 
     build_menus();
     g.hwnd = CreateWindowExW(0, cls.lpszClassName, L"Nacre", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
@@ -2289,6 +2555,9 @@ bool initialize(int show) {
     if (!g.hwnd) return false;
     g.scale = (float)GetDpiForWindow(g.hwnd) / 96.0f;
     style_title_bar();
+    g.display = CreateWindowExW(0, L"NacreDisplay", NULL, WS_CHILD | WS_CLIPSIBLINGS, 0, 0, 1, 1, g.hwnd,
+                                NULL, g.instance, NULL);
+    if (!g.display) return false;
 
     g.tooltips = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, NULL, WS_POPUP | TTS_ALWAYSTIP,
                                  CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, g.hwnd,
