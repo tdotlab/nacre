@@ -20,6 +20,29 @@ static void nds_test_put32(uint8_t *p, uint32_t v) {
     p[3] = (uint8_t)(v >> 24);
 }
 
+/* The test program, assembled from tests/nds_test_rom.s. The ARM9 sets both
+ * engines' backdrops (red over green), calls SWI Div(100, 7), waits for the
+ * ARM7 to send 5 over IPCSYNC, then takes three VBlank IRQs through the BIOS
+ * with VBlankIntrWait, then turns IME off. Results land at 0x02100000: quotient, remainder, IRQ
+ * count, the IPCSYNC value, and 0x77 when done. The ARM7 sends 5 and halts. */
+static const uint32_t nds_test_arm9[] = {
+    0xE321F092, 0xE59FD0E0, 0xE321F01F, 0xE59FD0DC, 0xE3A00301, 0xE3A01801,
+    0xE5801000, 0xE2804A01, 0xE5841000, 0xE3A02405, 0xE3A0301F, 0xE1C230B0,
+    0xE2825B01, 0xE3A03E3E, 0xE1C530B0, 0xE3A06621, 0xE3A00064, 0xE3A01007,
+    0xEF090000, 0xE5860000, 0xE5861004, 0xE3A00301, 0xE2807D06, 0xE1D710B0,
+    0xE201100F, 0xE3510005, 0x1AFFFFFB, 0xE586100C, 0xE59F107C, 0xE28F2040,
+    0xE5812000, 0xE3A01008, 0xE1C010B4, 0xE3A01001, 0xE5801210, 0xE5801208,
+    0xE3A08003, 0xEF050000, 0xE2588001, 0x1AFFFFFC, 0xE3A00301, 0xE3A01000,
+    0xE5801208, 0xE3A01077, 0xE5861010, 0xEE070F90, 0xEAFFFFFD, 0xE3A00301,
+    0xE5901214, 0xE5801214, 0xE59F2028, 0xE5923000, 0xE1833001, 0xE5823000,
+    0xE59F201C, 0xE5923000, 0xE2833001, 0xE5823000, 0xE12FFF1E, 0x027C3F00,
+    0x027C3E00, 0x027C3FFC, 0x027C3FF8, 0x02100008,
+};
+static const uint32_t nds_test_arm7[] = {
+    0xE3A00301, 0xE3A01C05, 0xE2800D06, 0xE1C010B0, 0xE3A00301, 0xE3A01080,
+    0xE5C01301, 0xEAFFFFFD,
+};
+
 /* Recomputes the header checksum after any change to the first 0x15E bytes. */
 static void nds_test_seal(uint8_t *rom) {
     uint16_t crc = nds_crc16(0xFFFF, rom, 0x15E);
@@ -45,6 +68,8 @@ static void nds_test_make_rom(uint8_t *rom, const char *banner_title) {
     nds_test_put32(rom + 0x38, 0x037F8000);
     nds_test_put32(rom + 0x3C, 0x1000);
     nds_test_put32(rom + 0x80, NDS_TEST_ROM_SIZE);
+    for (size_t i = 0; i < sizeof nds_test_arm9 / 4; i++) nds_test_put32(rom + 0x4000 + i * 4, nds_test_arm9[i]);
+    for (size_t i = 0; i < sizeof nds_test_arm7 / 4; i++) nds_test_put32(rom + 0x5000 + i * 4, nds_test_arm7[i]);
     if (banner_title) {
         nds_test_put32(rom + 0x68, NDS_TEST_BANNER);
         rom[NDS_TEST_BANNER] = 1; /* banner version */

@@ -44,11 +44,20 @@ void nds_reset(Nds *nds) {
     nds->cycles = 0;
     nds->frame_cycle = 0;
     nds->frame_count = 0;
+    nds->line = 0;
+    nds->line_cycle = 0;
     nds->pace_target = 0;
     nds->pace_fraction = 0;
     nds->sample_fraction = 0;
     nds->audio_read = nds->audio_write = 0;
     memset(nds->framebuffer, 0, sizeof nds->framebuffer);
+    nds_mem_reset(nds);
+    nds_io_reset(nds);
+    nds_arm_reset(&nds->arm9, nds, 1);
+    nds_arm_reset(&nds->arm7, nds, 0);
+    nds_cp15_reset(nds);
+    nds_bios_build(nds);
+    if (nds->rom) nds_direct_boot(nds);
 }
 
 /* Queues one stereo frame, dropping the oldest when the ring is full. */
@@ -68,20 +77,52 @@ static void produce_audio(Nds *nds, uint32_t cycles) {
     while (frames--) push_audio(nds, 0, 0);
 }
 
+/* The CPUs run in short slices between display events, the ARM9 first (two of
+ * its cycles per ARM7 cycle). Slices are short so IPC and IRQs between the two
+ * CPUs land close to when they happen. */
+#define NDS_SLICE 64u
+
+/* DISPSTAT: bit 3 VBlank IRQ enable, 4 HBlank, 5 VCount match. */
+static void display_irq(Nds *nds, uint32_t enable_bit, uint32_t irq) {
+    for (int cpu = 0; cpu < 2; cpu++)
+        if (nds->dispstat[cpu] & enable_bit) nds_irq_raise(nds, cpu, irq);
+}
+
+static void start_line(Nds *nds) {
+    if (nds->line == NDS_SCREEN_HEIGHT) display_irq(nds, 1u << 3, NDS_IRQ_VBLANK);
+    for (int cpu = 0; cpu < 2; cpu++) {
+        uint32_t ds = nds->dispstat[cpu], target = (ds >> 8) | ((ds & 0x80) << 1);
+        if ((ds & (1u << 5)) && nds->line == target) nds_irq_raise(nds, cpu, NDS_IRQ_VCOUNT);
+    }
+}
+
 int nds_run_cycles(Nds *nds, uint32_t cycles, char *error, size_t error_capacity) {
     (void)error;
     (void)error_capacity;
     if (!nds->rom) return 1;
     while (cycles) {
-        uint32_t step = NDS_CYCLES_PER_FRAME - nds->frame_cycle;
+        uint32_t event = nds->line_cycle < NDS_HBLANK_CYCLE ? NDS_HBLANK_CYCLE : NDS_LINE_CYCLES;
+        uint32_t step = event - nds->line_cycle;
+        if (step > NDS_SLICE) step = NDS_SLICE;
         if (step > cycles) step = cycles;
+        nds_arm_run(&nds->arm9, (nds->cycles + step) * 2);
+        nds_arm_run(&nds->arm7, nds->cycles + step);
         produce_audio(nds, step);
         nds->cycles += step;
         nds->frame_cycle += step;
+        nds->line_cycle += step;
         cycles -= step;
-        if (nds->frame_cycle == NDS_CYCLES_PER_FRAME) {
-            nds->frame_cycle = 0;
-            nds->frame_count++;
+        if (nds->line_cycle == NDS_HBLANK_CYCLE) {
+            if (nds->line < NDS_SCREEN_HEIGHT) nds_render_line(nds, nds->line);
+            display_irq(nds, 1u << 4, NDS_IRQ_HBLANK);
+        } else if (nds->line_cycle == NDS_LINE_CYCLES) {
+            nds->line_cycle = 0;
+            if (++nds->line == NDS_LINES) {
+                nds->line = 0;
+                nds->frame_cycle = 0;
+                nds->frame_count++;
+            }
+            start_line(nds);
         }
     }
     return 1;

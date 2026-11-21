@@ -6,6 +6,7 @@
 
 #include "nds.h"
 #include "nds_test_rom.h"
+#include "../src/nds/nds_internal.h" /* machine_checks look inside */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -74,6 +75,15 @@ static void header_checks(void) {
     bad[0xC0] ^= 1;
     nds_test_seal(bad);
     CHECK(!nds_rom_looks_valid(bad, sizeof bad));
+
+    /* Homebrew with its own logo loads when the logo's checksum field matches. */
+    {
+        uint16_t logo = nds_crc16(0xFFFF, bad + 0xC0, 0x9C);
+        bad[0x15C] = (uint8_t)logo;
+        bad[0x15D] = (uint8_t)(logo >> 8);
+        nds_test_seal(bad);
+        CHECK(nds_rom_looks_valid(bad, sizeof bad) && loads(bad, sizeof bad));
+    }
 
     /* DSi-only cartridges are refused by name. */
     memcpy(bad, rom, sizeof bad);
@@ -156,6 +166,30 @@ static void timing_checks(void) {
     nds = nds_create();
     CHECK(nds_advance_ns(nds, 100000000u, 100, error, sizeof error));
     CHECK(nds_frame_count(nds) == 0 && nds_audio_available(nds) == 0);
+    nds_destroy(nds);
+}
+
+/* The built-in test program: both CPUs boot directly, the ARM9 uses a SWI, the
+ * IPC registers, the display and VBlank IRQs through our BIOS. */
+static void machine_checks(void) {
+    Nds *nds = nds_create();
+    const uint32_t *fb;
+    nds_test_make_rom(rom, NULL);
+    CHECK(nds_load_rom(nds, rom, sizeof rom, error, sizeof error));
+    CHECK(nds->arm9.r[15] == 0x02000008u && nds->arm7.r[15] == 0x037F8008u);
+    CHECK(nds_run_cycles(nds, NDS_CYCLES_PER_FRAME * 5, error, sizeof error));
+    CHECK(nds9_read32(nds, 0x02100000u) == 14);   /* 100 / 7 */
+    CHECK(nds9_read32(nds, 0x02100004u) == 2);    /* 100 % 7 */
+    CHECK(nds9_read32(nds, 0x0210000Cu) == 5);    /* the ARM7's IPCSYNC value */
+    CHECK(nds9_read32(nds, 0x02100008u) == 3);    /* VBlank IRQs handled */
+    CHECK(nds9_read32(nds, 0x02100010u) == 0x77); /* reached the end */
+    /* The ARM9 spins in its halt loop (a pending VBlank in IE & IF ends a halt
+     * even with IME off); the ARM7 stays halted. */
+    CHECK(nds->arm7.halted);
+    CHECK(nds->arm9.undefined_count == 0 && nds->arm7.undefined_count == 0);
+    /* Engine A (red backdrop) on top, engine B (green) below. */
+    fb = nds_framebuffer(nds);
+    CHECK(fb[0] == 0xFF0000u && fb[NDS_FRAME_WIDTH * NDS_FRAME_HEIGHT - 1] == 0x00FF00u);
     nds_destroy(nds);
 }
 
@@ -243,6 +277,7 @@ int main(int argc, char **argv) {
     crc_checks();
     header_checks();
     timing_checks();
+    machine_checks();
     input_checks();
     if (failures) {
         printf("test_nds: %d failure(s)\n", failures);

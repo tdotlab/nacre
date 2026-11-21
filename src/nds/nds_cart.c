@@ -5,9 +5,6 @@
 #include <stdio.h>
 #include <string.h>
 
-/* Fixed checksum of the Nintendo logo at 0xC0..0x15B, which the firmware checks. */
-#define LOGO_CRC 0xCF56u
-
 static uint32_t le32(const uint8_t *p) {
     return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
 }
@@ -24,8 +21,9 @@ uint16_t nds_crc16(uint16_t crc, const uint8_t *data, size_t length) {
 
 int nds_rom_looks_valid(const uint8_t *rom, size_t length) {
     if (!rom || length < 0x160) return 0;
-    if (le16(rom + 0x15C) != LOGO_CRC) return 0;
-    if (nds_crc16(0xFFFF, rom + 0xC0, 0x9C) != LOGO_CRC) return 0;
+    /* Retail carts carry the Nintendo logo. Homebrew built for flashcards may
+     * carry another one, but its stored checksum still matches its contents. */
+    if (nds_crc16(0xFFFF, rom + 0xC0, 0x9C) != le16(rom + 0x15C)) return 0;
     return nds_crc16(0xFFFF, rom, 0x15E) == le16(rom + 0x15E);
 }
 

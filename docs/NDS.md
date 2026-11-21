@@ -1,9 +1,12 @@
 # Nintendo DS core
 
-Status: M0 (plumbing) done. An `.nds` file is detected, its header checked, and
-the core shows black 256×384 frames at 59.8261 Hz with silent, correctly paced
-audio. There is no CPU yet; that is M1. This file is the plan until the core
-exists, then it becomes the core's reference, the way docs/PS2.md is for PS2.
+Status: M1a (CPUs, memory, BIOS, direct boot) done; M1b (test-ROM validation)
+next. Both ARM CPUs run a cartridge from direct boot through our own BIOS, and
+display modes 0-3 show. The built-in test cartridge passes end to end, and the
+homebrew test ROM rockwrestler boots to its menu, but nothing has been checked
+against armwrestler or rockwrestler's own pass/fail pages yet. Audio is still
+silent. This file is the plan until the core exists, then it becomes the core's
+reference, the way docs/PS2.md is for PS2.
 
 ## Shape
 
@@ -47,6 +50,11 @@ plus public test ROMs and homebrew. We do not read other emulators' source
 and behavior is fine, and is how 3D gets checked without real hardware. Any
 outside source beyond GBATEK and test ROM READMEs is logged here, with what was
 learned, in behavior terms. That keeps "our own code" true and checkable.
+
+Sources used so far: GBATEK (CPU, CP15, memory maps, I/O, BIOS functions, boot
+state). The rockwrestler ROM (prebuilt, run only) and armwrestler (assembled
+from its public source with the GNU Arm toolchain, run only) are test inputs,
+not references.
 
 **Video.** One XRGB8888 frame, 256×384: top screen over bottom, no gap, square
 pixels, so the frontends integer-scale it as they do the Game Boy. DS colors are
@@ -106,8 +114,9 @@ table sets neither flag until M5.
 Mac look tables. Pad labels: A EAST, B SOUTH, X NORTH, Y WEST, L L1, R R1,
 Select, Start.
 
-**Probe.** A DS header is identified by the logo CRC 0xCF56 at 0x15C and a valid
-header CRC16 at 0x15E, which gives 100. A Game Boy ROM can't match both, so probe
+**Probe.** A DS header is identified by a logo CRC at 0x15C that matches the logo
+field (0xCF56 on retail carts; homebrew for flashcards may carry its own logo,
+as rockwrestler does) and a valid header CRC16 at 0x15E, which gives 100. A Game Boy ROM can't match both, so probe
 ties don't arise.
 
 ## Milestones
@@ -126,11 +135,31 @@ harness grows with each milestone, as `test_gb` did.
    - Moved to M1, where they first have something to test: `--press/--touch`,
      the ROM fetch tool (`tools/get-nds-test-roms.py`), and the BlocksDS SDK in
      `C:\Users\ringd\tools\blocksds\` for our own small hardware tests.
-2. **M1, CPUs and boot.**
-   - The ARM/Thumb interpreter, CP15 and TCM, both memory maps, direct boot,
-     the BIOS SWIs, and VRAM display-from-LCDC mode, which test ROMs draw with.
-   - Done when armwrestler passes every page and rockwrestler passes, by frame
-     hash.
+2. **M1, CPUs and boot.** Split in two.
+   - **M1a, done.** The ARM/Thumb interpreter (`nds_arm.c`, ARMv5TE and ARMv4T
+     in one), CP15 and TCM (`nds_cp15.c`), both memory maps with WRAM and VRAM
+     bank mapping (`nds_mem.c`), interrupts, IPCSYNC/FIFO, the math unit and
+     keys (`nds_io.c`), our BIOS and direct boot (`nds_bios.c`), display modes
+     0-3 with VRAM display from banks A-D (`nds_gpu2d.c`), and the line
+     scheduler in `nds.c` (ARM9 then ARM7 in 64-cycle slices, HBlank, VBlank
+     and VCount IRQs).
+   - The BIOS is ours: exception vectors, an IRQ trampoline that calls the
+     handler at DTCM+0x3FFC (ARM9) or 0x0380FFFC (ARM7), and every SWI run in C.
+     That covers SoftReset, WaitByLoop, IntrWait and VBlankIntrWait, Halt,
+     Sleep, Div, Sqrt, CpuSet, CpuFastSet, CRC16, BitUnPack, the LZ77, Huffman
+     and RL decompressors (callback forms run guest code), and Diff8/16.
+     SoundBias is a no-op and the sound tables (0x1A-0x1C) return 0 until M4.
+   - Direct boot leaves the ARM9's stacks in shared WRAM it can't see, as
+     hardware does (GBATEK marks it "(!)"); every game sets its own.
+   - The built-in test cartridge (`tests/nds_test_rom.s`) exercises boot, a
+     SWI, IPCSYNC, the display and VBlank IRQs through the BIOS trampoline.
+   - **M1b, next.** `--press/--touch/--bench` in `test_nds`,
+     `tools/get-nds-test-roms.py` (pinned sources; assemble armwrestler and pack
+     it with our own `.nds` packer; fetch rockwrestler), and fixes until
+     armwrestler passes every page and rockwrestler passes, by frame hash.
+     BlocksDS stays optional.
+   - Deferred to M2: timers, DMA, SPI (firmware settings, touch, power), RTC
+     and cart data-mode reads.
 3. **M2, the rest of the system.**
    - IRQs, timers, DMA, IPC, the math unit, keypad, SPI (firmware, touch,
      power), RTC, and cart data-mode reads.

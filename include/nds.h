@@ -76,8 +76,8 @@ const char *nds_title(const Nds *nds);
 /* The four-character game code ("AMCE"), or "" with no cartridge. */
 const char *nds_game_code(const Nds *nds);
 
-/* Returns 1 if the bytes start with a valid DS cartridge header: the fixed logo
- * checksum and a matching header checksum. Needs the first 0x160 bytes. */
+/* Returns 1 if the bytes start with a valid DS cartridge header: the logo and
+ * header checksums both match their fields. Needs the first 0x160 bytes. */
 int nds_rom_looks_valid(const uint8_t *rom, size_t length);
 
 /* CRC-16 as the DS BIOS computes it (reflected polynomial 0xA001). */

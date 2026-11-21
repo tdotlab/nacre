@@ -174,7 +174,9 @@ current status.
 A DS core of our own, from GBATEK, is under way. docs/NDS.md has the plan,
 decisions and milestones. M0 (plumbing) is done: pointer input in the core API,
 DS buttons in the key bindings and gamepad map, late-sized saves, detection, and
-black frames. M1 is the ARM interpreter and direct boot.
+black frames. M1a is done too: both ARM CPUs, memory maps, our own BIOS and
+direct boot, with homebrew test ROMs booting. M1b validates against
+armwrestler and rockwrestler.
 
 ## Suggested implementation settings
 
