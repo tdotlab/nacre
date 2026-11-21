@@ -8,6 +8,7 @@
 /* Order breaks probe ties: earlier wins. */
 static const NacreCore *const CORES[] = {
     &nacre_gb_core,
+    &nacre_nds_core,
     &nacre_chip8_core,
 #ifdef NACRE_HAVE_PS2
     &nacre_ps2_core,
@@ -77,5 +78,8 @@ int nacre_core_validate(const NacreCore *core, char *error, size_t error_capacit
     for (int b = 0; b < NACRE_PAD_BUTTON_COUNT; b++) has_pad |= core->pad_labels[b] != NULL;
     if (has_pad) REQUIRE(core->set_pad, "has pad buttons but no set_pad");
     if (core->keypad_keys) REQUIRE(core->set_keypad, "has a keypad but no set_keypad");
+    if (core->flags & NACRE_CORE_HAS_POINTER) REQUIRE(core->set_pointer, "has a pointer but no set_pointer");
+    if (core->flags & NACRE_CORE_SAVE_SIZED_LATER)
+        REQUIRE(core->flags & NACRE_CORE_HAS_BATTERY, "sizes saves later but has no battery saves");
     return 1;
 }

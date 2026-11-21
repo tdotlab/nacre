@@ -67,6 +67,12 @@ typedef struct {
     uint64_t status_until;
     char *prefs_path; /* controls.txt in the user's preference folder */
 
+    /* The mouse as a stylus, for cores with a touchscreen: where the last frame was
+     * drawn (output pixels) and its size, so a click maps to frame pixels. */
+    SDL_FRect shown_rect;
+    unsigned shown_w, shown_h;
+    bool pointer_down;
+
     /* The controls overlay (F10). */
     bool rebinding;
     bool capturing; /* waiting for the key to bind */
@@ -88,7 +94,8 @@ static const char *const palette_name[3] = { "Fern", "Amber", "Pearl" };
 #define SCREEN_BACKGROUND 0x18211Eu
 
 /* Arrows and WASD for the D-pad, X/K for A, Z/J for B, Enter for Start, Backspace or
- * right Shift for Select; Tab fast-forwards, F5 and F7 save and load, F6 changes slot.
+ * right Shift for Select; C/I for X, V/U for Y, Q and E for L and R (DS only); Tab
+ * fast-forwards, F5 and F7 save and load, F6 changes slot.
  * On a CHIP-8 keypad (1234/QWER/ASDF/ZXCV) the keypad takes those keys first. */
 static const int default_keys[GBI_COUNT][GBI_KEYS_PER_ACTION] = {
     { SDL_SCANCODE_RIGHT, SDL_SCANCODE_D },
@@ -99,6 +106,10 @@ static const int default_keys[GBI_COUNT][GBI_KEYS_PER_ACTION] = {
     { SDL_SCANCODE_Z, SDL_SCANCODE_J },
     { SDL_SCANCODE_BACKSPACE, SDL_SCANCODE_RSHIFT },
     { SDL_SCANCODE_RETURN, SDL_SCANCODE_KP_ENTER },
+    { SDL_SCANCODE_C, SDL_SCANCODE_I },
+    { SDL_SCANCODE_V, SDL_SCANCODE_U },
+    { SDL_SCANCODE_Q, GBI_UNBOUND },
+    { SDL_SCANCODE_E, GBI_UNBOUND },
     { SDL_SCANCODE_TAB, GBI_UNBOUND },
     { SDL_SCANCODE_F5, GBI_UNBOUND },
     { SDL_SCANCODE_F7, GBI_UNBOUND },
@@ -454,7 +465,7 @@ static void action_release(App *app, int action) {
 /* Reads the controllers: held buttons feed the core, and the state hotkeys fire once
  * per press. Only the focused, running window listens, so a game in the background isn't played. */
 static void poll_pad(App *app) {
-    unsigned held = pad_poll();
+    unsigned held = pad_poll(gbi_labeled_buttons(current_core(app)));
     const char *note = pad_take_message();
     if (note) set_status(app, "%s", note);
     if (!current_core(app) || is_paused(app) || SDL_GetAtomicInt(&app->dialog_pending)) held = 0;
@@ -509,6 +520,31 @@ static void release_keys(App *app) {
     app->pad_held = 0;
     app->pad_seen = 0;
     apply_buttons(app);
+    if (app->pointer_down && core && core->set_pointer) core->set_pointer(current_instance(app), 0, -1, -1, 0);
+    app->pointer_down = false;
+}
+
+/* Sends a mouse position (window coordinates) to a core that takes a pointer, in the
+ * pixels of the frame it last drew; off the frame is -1, -1. */
+static void send_pointer(App *app, SDL_Event *event, bool pressed) {
+    const NacreCore *core = current_core(app);
+    int fx = -1, fy = -1;
+    float x, y;
+    if (!core || !(core->flags & NACRE_CORE_HAS_POINTER) || is_paused(app)) return;
+    if (!pressed && !app->pointer_down) return; /* hovering means nothing to a touchscreen */
+    SDL_ConvertEventToRenderCoordinates(app->renderer, event);
+    x = event->type == SDL_EVENT_MOUSE_MOTION ? event->motion.x : event->button.x;
+    y = event->type == SDL_EVENT_MOUSE_MOTION ? event->motion.y : event->button.y;
+    if (app->shown_rect.w > 0.0f && app->shown_rect.h > 0.0f) {
+        float u = (x - app->shown_rect.x) / app->shown_rect.w;
+        float v = (y - app->shown_rect.y) / app->shown_rect.h;
+        if (u >= 0.0f && u < 1.0f && v >= 0.0f && v < 1.0f) {
+            fx = (int)(u * (float)app->shown_w);
+            fy = (int)(v * (float)app->shown_h);
+        }
+    }
+    app->pointer_down = pressed;
+    core->set_pointer(current_instance(app), 0, fx, fy, pressed);
 }
 
 static void open_controls(App *app) {
@@ -709,6 +745,14 @@ static void handle_event(App *app, SDL_Event *event) {
         case SDL_EVENT_KEY_UP:
             handle_key_event(app, &event->key, false);
             break;
+        case SDL_EVENT_MOUSE_BUTTON_DOWN:
+        case SDL_EVENT_MOUSE_BUTTON_UP:
+            if (event->button.button == SDL_BUTTON_LEFT)
+                send_pointer(app, event, event->type == SDL_EVENT_MOUSE_BUTTON_DOWN);
+            break;
+        case SDL_EVENT_MOUSE_MOTION:
+            if (app->pointer_down) send_pointer(app, event, true);
+            break;
         case SDL_EVENT_DROP_FILE:
             if (event->drop.data) {
                 char error[256];
@@ -797,9 +841,11 @@ static bool upload_frame(App *app, const NacreVideoFrame *frame) {
     return ok;
 }
 
-/* Debug text is an 8x8 bitmap font; scale it to the window so it stays readable. */
-static float text_scale(int width) {
-    float scale = SDL_floorf((float)width / 440.0f);
+/* Debug text is an 8x8 bitmap font; scale it to the window so it stays readable and
+ * the controls list (about 440 x 290 at 1x) still fits. */
+static float text_scale(int width, int height) {
+    float wide = SDL_floorf((float)width / 440.0f), tall = SDL_floorf((float)height / 290.0f);
+    float scale = wide < tall ? wide : tall;
     return scale < 1.0f ? 1.0f : (scale > 4.0f ? 4.0f : scale);
 }
 
@@ -814,7 +860,7 @@ static void draw_hud(App *app, int width, int height) {
     if (!status && app->status[0]) app->status[0] = '\0';
     if (!status && !app->ff_on) return;
 
-    float scale = text_scale(width);
+    float scale = text_scale(width, height);
     SDL_SetRenderScale(app->renderer, scale, scale);
     SDL_SetRenderDrawBlendMode(app->renderer, SDL_BLENDMODE_BLEND);
     float lw = (float)width / scale, lh = (float)height / scale;
@@ -836,7 +882,7 @@ static void draw_hud(App *app, int width, int height) {
 
 /* F10: every action with its two keys. Rows are picked with the arrows. */
 static void draw_controls(App *app, int width, int height) {
-    float scale = text_scale(width);
+    float scale = text_scale(width, height);
     SDL_FRect all = { 0.0f, 0.0f, (float)width, (float)height };
     SDL_SetRenderDrawBlendMode(app->renderer, SDL_BLENDMODE_BLEND);
     SDL_SetRenderDrawColor(app->renderer, 0x0C, 0x10, 0x0E, 235);
@@ -869,9 +915,13 @@ static void draw_controls(App *app, int width, int height) {
     y += 5.0f;
     if (app->rb_note[0]) draw_text(app, x, y, app->rb_note, 0xE0, 0x90, 0x70);
     y += 12.0f;
-    draw_text(app, x, y, "Pad: D-pad/stick, B/A buttons, R shoulder = fast", 0x9A, 0xB0, 0xA2);
+    draw_text(app, x, y, "Pad: D-pad/stick, face buttons by position", 0x9A, 0xB0, 0xA2);
     y += 10.0f;
-    draw_text(app, x, y, "L shoulder + Start/Back/Y = save/load/slot", 0x9A, 0xB0, 0xA2);
+    draw_text(app, x, y, "GB: R shoulder fast, L shoulder + Start/Back/Y", 0x9A, 0xB0, 0xA2);
+    y += 10.0f;
+    draw_text(app, x, y, "DS: R trigger fast, L trigger + Start/Back/Y", 0x9A, 0xB0, 0xA2);
+    y += 10.0f;
+    draw_text(app, x, y, "    = save/load/slot; click the lower screen to touch", 0x9A, 0xB0, 0xA2);
     y += 10.0f;
     draw_text(app, x, y, "CHIP-8 keypad: 1234 QWER ASDF ZXCV", 0x9A, 0xB0, 0xA2);
     SDL_SetRenderScale(app->renderer, 1.0f, 1.0f);
@@ -902,6 +952,11 @@ static int render_frame(App *app) {
             source_h * scale
         };
         if (!SDL_RenderTexture(app->renderer, app->texture, NULL, &destination)) return 0;
+        app->shown_rect = destination;
+        app->shown_w = frame->width;
+        app->shown_h = frame->height;
+    } else {
+        app->shown_rect.w = app->shown_rect.h = 0.0f;
     }
     if (app->rebinding) draw_controls(app, width, height);
     else draw_hud(app, width, height);

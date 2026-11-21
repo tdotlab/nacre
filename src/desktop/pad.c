@@ -71,12 +71,22 @@ void pad_shutdown(void) {
     ready = 0;
 }
 
-static unsigned read_pad(SDL_Gamepad *pad) {
+static unsigned read_pad(SDL_Gamepad *pad, uint32_t labeled) {
     unsigned held = 0;
+    int has_x = (labeled & NACRE_PAD_BIT(NACRE_PAD_NORTH)) != 0;
+    int has_y = (labeled & NACRE_PAD_BIT(NACRE_PAD_WEST)) != 0;
+    int has_l = (labeled & NACRE_PAD_BIT(NACRE_PAD_L1)) != 0;
+    int has_r = (labeled & NACRE_PAD_BIT(NACRE_PAD_R1)) != 0;
     int x = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX);
     int y = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY);
-    int modifier = SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
+    int left_shoulder = SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
+    int right_shoulder = SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
+    int left_trigger = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > TRIGGER_THRESHOLD;
+    int right_trigger = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > TRIGGER_THRESHOLD;
+    /* The hotkey modifier is the left shoulder, unless the core uses it as L. */
+    int modifier = has_l ? left_trigger : left_shoulder;
     int north = SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_NORTH);
+    int west = SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_WEST);
     int start = SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_START);
     int back = SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_BACK);
 
@@ -84,15 +94,13 @@ static unsigned read_pad(SDL_Gamepad *pad) {
     if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_DPAD_LEFT) || x < -STICK_THRESHOLD) held |= PAD_BIT(GBI_LEFT);
     if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_DPAD_UP) || y < -STICK_THRESHOLD) held |= PAD_BIT(GBI_UP);
     if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_DPAD_DOWN) || y > STICK_THRESHOLD) held |= PAD_BIT(GBI_DOWN);
-    if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_EAST) || (north && !modifier)) held |= PAD_BIT(GBI_A);
-    if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_SOUTH) || SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_WEST)) {
-        held |= PAD_BIT(GBI_B);
-    }
-    if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER) ||
-        SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > TRIGGER_THRESHOLD ||
-        SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > TRIGGER_THRESHOLD) {
-        held |= PAD_BIT(GBI_FAST_FORWARD);
-    }
+    if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_EAST) || (north && !modifier && !has_x)) held |= PAD_BIT(GBI_A);
+    if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_SOUTH) || (west && !has_y)) held |= PAD_BIT(GBI_B);
+    if (north && !modifier && has_x) held |= PAD_BIT(GBI_X);
+    if (west && has_y) held |= PAD_BIT(GBI_Y);
+    if (left_shoulder && has_l) held |= PAD_BIT(GBI_L);
+    if (right_shoulder && has_r) held |= PAD_BIT(GBI_R);
+    if ((right_shoulder && !has_r) || right_trigger || (left_trigger && !has_l)) held |= PAD_BIT(GBI_FAST_FORWARD);
     /* With the left shoulder down, Start/Back/North are hotkeys instead of buttons. */
     if (modifier) {
         if (start) held |= PAD_BIT(GBI_SAVE_STATE);
@@ -105,7 +113,7 @@ static unsigned read_pad(SDL_Gamepad *pad) {
     return held;
 }
 
-unsigned pad_poll(void) {
+unsigned pad_poll(uint32_t labeled) {
     unsigned held = 0;
     int i;
     Uint64 now;
@@ -117,7 +125,7 @@ unsigned pad_poll(void) {
         scan();
     }
     for (i = 0; i < MAX_PADS; i++) {
-        if (pads[i]) held |= read_pad(pads[i]);
+        if (pads[i]) held |= read_pad(pads[i], labeled);
     }
     return held;
 }

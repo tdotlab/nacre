@@ -32,7 +32,7 @@
 extern "C" {
 #endif
 
-#define NACRE_CORE_API_VERSION 1
+#define NACRE_CORE_API_VERSION 2
 
 /* Probes see at most this many leading bytes of a file (enough to reach the ISO
  * 9660 volume descriptor at 32 KiB). */
@@ -47,7 +47,12 @@ enum {
     NACRE_CORE_NEEDS_PATH = 1u << 3,    /* content must be loaded by path, not bytes */
     NACRE_CORE_NEEDS_SYSTEM_FILES = 1u << 4, /* needs BIOS or firmware in system_dir */
     NACRE_CORE_HAS_STATES = 1u << 5,    /* supports save states */
-    NACRE_CORE_HAS_BATTERY = 1u << 6    /* may carry battery-backed saves */
+    NACRE_CORE_HAS_BATTERY = 1u << 6,   /* may carry battery-backed saves */
+    /* The save's size may only be known once the game has run (a cartridge that
+     * doesn't say which save chip it has): the session hands an existing save to
+     * save_load even while save_size is still 0. */
+    NACRE_CORE_SAVE_SIZED_LATER = 1u << 7,
+    NACRE_CORE_HAS_POINTER = 1u << 8    /* takes a pointer (touchscreen) via set_pointer */
 };
 
 /* ---- Video ------------------------------------------------------------- */
@@ -220,6 +225,10 @@ struct NacreCore {
     void (*set_pad)(void *self, unsigned port, uint32_t buttons);
     void (*set_axis)(void *self, unsigned port, NacreAxis axis, int16_t value);
     void (*set_keypad)(void *self, unsigned key, int pressed);
+    /* Pointer (NACRE_CORE_HAS_POINTER): a position in the pixels of the frame from
+     * `video`, or -1, -1 when it is off the frame, and whether it is pressed. The
+     * host sends it whenever either changes. */
+    void (*set_pointer)(void *self, unsigned port, int x, int y, int pressed);
 
     /* Battery saves (cartridge RAM and the like) that the host keeps beside the
      * content. Size 0 means there is none. A core that keeps its own save files in
@@ -265,6 +274,7 @@ int nacre_core_validate(const NacreCore *core, char *error, size_t error_capacit
 /* The built-in tables. */
 extern const NacreCore nacre_chip8_core;
 extern const NacreCore nacre_gb_core;
+extern const NacreCore nacre_nds_core;
 #ifdef NACRE_HAVE_PS2
 extern const NacreCore nacre_ps2_core; /* src/core/ps2_core.cpp, built with NACRE_PS2 */
 #endif

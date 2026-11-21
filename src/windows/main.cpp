@@ -107,6 +107,7 @@ struct SystemLook {
 const SystemLook LOOKS_BY_SYSTEM[] = {
     {"chip8", true, L"60 HZ TIMERS"},
     {"gb", false, L"59.7 HZ FRAMES"},
+    {"nds", false, L"59.8 HZ FRAMES"},
 };
 const SystemLook DEFAULT_LOOK = {"", false, L""};
 const float SIDEBAR_W = 222.0f;
@@ -140,6 +141,7 @@ struct App {
     uint32_t pad_buttons, shown_pad_buttons; /* NACRE_PAD_BIT flags sent to the core */
     bool keypad_held[16], shown_keypad[16];
     bool ff_key, ff_on;          /* fast-forward key held; fast-forward running */
+    bool pointer_down;           /* the mouse is pressed on a touchscreen core */
     int slot;                    /* save-state slot, 0-based */
     std::wstring status;         /* short-lived footer message */
     uint64_t status_until;
@@ -278,6 +280,10 @@ const int DEFAULT_KEYS[GBI_COUNT][GBI_KEYS_PER_ACTION] = {
     {0x2C, 0x24},   /* B: Z, J */
     {0x0E, 0x36},   /* Select: Backspace, right Shift */
     {0x1C, 0x11C},  /* Start: Enter, keypad Enter */
+    {0x2E, 0x17},   /* X: C, I */
+    {0x2F, 0x16},   /* Y: V, U */
+    {0x10, -1},     /* L: Q */
+    {0x12, -1},     /* R: E */
     {0x0F, -1},     /* Fast-forward: Tab */
     {0x3F, -1},     /* Save state: F5 */
     {0x41, -1},     /* Load state: F7 */
@@ -490,6 +496,8 @@ void release_keys() {
     g.ff_key = false;
     g.pad_buttons = 0;
     if (has_pad()) core()->set_pad(core_self(), 0, 0);
+    if (g.pointer_down && core() && core()->set_pointer) core()->set_pointer(core_self(), 0, -1, -1, 0);
+    g.pointer_down = false;
 }
 
 /* ---- Geometry ---------------------------------------------------------- */
@@ -655,6 +663,27 @@ void draw_bitmap(Graphics &gfx, const NacreVideoFrame *frame, const Rect &at) {
     gfx.DrawImage(g.frame_bitmap, at, 0, 0, (INT)frame->width, (INT)frame->height, UnitPixel);
 }
 
+/* A click on a touchscreen core goes to it in the pixels of its frame; off the frame
+ * is -1, -1. The mouse is captured while pressed, so a drag off the window ends. */
+void send_pointer(LPARAM lparam, bool pressed) {
+    const NacreCore *c = core();
+    const NacreVideoFrame *frame = current_frame();
+    if (!c || !(c->flags & NACRE_CORE_HAS_POINTER) || !frame || !frame->width || !frame->height) return;
+    if (pressed && !g.pointer_down && paused()) return;
+    int fx = -1, fy = -1;
+    Rect at = frame_rect(well_rect(), frame);
+    int mx = GET_X_LPARAM(lparam), my = GET_Y_LPARAM(lparam);
+    if (at.Width > 0 && at.Height > 0 && mx >= at.X && my >= at.Y && mx < at.X + at.Width && my < at.Y + at.Height) {
+        fx = (int)((int64_t)(mx - at.X) * frame->width / at.Width);
+        fy = (int)((int64_t)(my - at.Y) * frame->height / at.Height);
+    }
+    if (pressed && !g.pointer_down) SetCapture(g.hwnd);
+    bool was_down = g.pointer_down;
+    g.pointer_down = pressed;
+    c->set_pointer(core_self(), 0, fx, fy, pressed ? 1 : 0);
+    if (!pressed && was_down && GetCapture() == g.hwnd) ReleaseCapture();
+}
+
 void draw_display(Graphics &gfx, const LRect &well) {
     const NacreVideoFrame *frame = current_frame();
     if (!frame || !frame->pixels || !frame->width || !frame->height) return;
@@ -709,16 +738,29 @@ void render(Graphics &gfx, const RECT &clip) {
                    g.keypad_held[KEY_VALUES[i]], 12);
         }
     } else {
-        /* A D-pad cross with two face buttons beside it, then Select and Start,
-         * labelled the way the system names them. */
+        /* A D-pad cross with the face buttons beside it, then Select and Start,
+         * labelled the way the system names them. A DS adds X, Y and the shoulders. */
         struct Cap { NacrePadButton button; float col, row, cols; const wchar_t *fallback; float size; };
-        static const Cap caps[] = {
+        static const Cap two_buttons[] = {
             {NACRE_PAD_UP, 1, 0, 1, L"↑", 15},    {NACRE_PAD_LEFT, 0, 1, 1, L"←", 15},
             {NACRE_PAD_RIGHT, 2, 1, 1, L"→", 15}, {NACRE_PAD_DOWN, 1, 2, 1, L"↓", 15},
             {NACRE_PAD_EAST, 3, 0, 1, L"A", 12},  {NACRE_PAD_SOUTH, 3, 1, 1, L"B", 12},
             {NACRE_PAD_SELECT, 0, 3, 2, L"SELECT", 9}, {NACRE_PAD_START, 2, 3, 2, L"START", 9},
         };
-        for (const Cap &cap : caps) {
+        static const Cap four_buttons[] = {
+            {NACRE_PAD_L1, 0, 0, 1, L"L", 12},    {NACRE_PAD_UP, 1, 0, 1, L"↑", 15},
+            {NACRE_PAD_R1, 2, 0, 1, L"R", 12},    {NACRE_PAD_NORTH, 3, 0, 1, L"X", 12},
+            {NACRE_PAD_LEFT, 0, 1, 1, L"←", 15},  {NACRE_PAD_RIGHT, 2, 1, 1, L"→", 15},
+            {NACRE_PAD_EAST, 3, 1, 1, L"A", 12},  {NACRE_PAD_DOWN, 1, 2, 1, L"↓", 15},
+            {NACRE_PAD_WEST, 2, 2, 1, L"Y", 12},  {NACRE_PAD_SOUTH, 3, 2, 1, L"B", 12},
+            {NACRE_PAD_SELECT, 0, 3, 2, L"SELECT", 9}, {NACRE_PAD_START, 2, 3, 2, L"START", 9},
+        };
+        bool four = c && c->pad_labels[NACRE_PAD_NORTH] && c->pad_labels[NACRE_PAD_WEST] &&
+                    c->pad_labels[NACRE_PAD_L1] && c->pad_labels[NACRE_PAD_R1];
+        const Cap *caps = four ? four_buttons : two_buttons;
+        size_t cap_count = four ? sizeof four_buttons / sizeof *four_buttons : sizeof two_buttons / sizeof *two_buttons;
+        for (size_t i = 0; i < cap_count; i++) {
+            const Cap &cap = caps[i];
             bool arrow = cap.button <= NACRE_PAD_RIGHT;
             const char *named = c && !arrow ? c->pad_labels[cap.button] : NULL;
             std::wstring label = named ? upper(widen(named)) : std::wstring(cap.fallback);
@@ -728,6 +770,10 @@ void render(Graphics &gfx, const RECT &clip) {
         }
         draw_text(gfx, L"Rebind keys: Session ▸ Controls", 26, 610, 190, 18, 10, UI, 0x7F847A);
         hint_y = 628;
+    }
+    if (c && (c->flags & NACRE_CORE_HAS_POINTER)) {
+        draw_text(gfx, L"Click the lower screen to touch", 26, hint_y, 190, 18, 10, UI, 0x7F847A);
+        hint_y += 18;
     }
     if (ready() && nacre_session_has_states(g.session)) {
         std::wstring fast = g.keys.key[GBI_FAST_FORWARD][0] < 0 && g.keys.key[GBI_FAST_FORWARD][1] < 0
@@ -1616,7 +1662,7 @@ void show() {
     }
     UINT dpi = GetDpiForWindow(g.hwnd);
     auto S = [&](int v) { return MulDiv(v, (int)dpi, 96); };
-    const int CLIENT_CW = 430, CLIENT_CH = 524;
+    const int CLIENT_CW = 430, CLIENT_CH = 630, ROW = 28;
     DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU, ex = WS_EX_DLGMODALFRAME;
     RECT rc = {0, 0, S(CLIENT_CW), S(CLIENT_CH)};
     AdjustWindowRectExForDpi(&rc, style, FALSE, ex, dpi);
@@ -1643,19 +1689,20 @@ void show() {
     };
     for (int a = 0; a < GBI_COUNT; a++) {
         std::wstring name = widen(gbi_name((GbInput)a));
-        child(L"STATIC", name.c_str(), SS_LEFT, 20, 21 + a * 32, 110, 20, -1);
+        child(L"STATIC", name.c_str(), SS_LEFT, 20, 20 + a * ROW, 110, 20, -1);
         for (int k = 0; k < GBI_KEYS_PER_ACTION; k++)
-            dlg.slot[a][k] = child(L"BUTTON", L"", BS_PUSHBUTTON | WS_TABSTOP, 140 + k * 140, 16 + a * 32, 130, 28,
+            dlg.slot[a][k] = child(L"BUTTON", L"", BS_PUSHBUTTON | WS_TABSTOP, 140 + k * 140, 16 + a * ROW, 130, 26,
                                    ID_SLOT_BASE + a * GBI_KEYS_PER_ACTION + k);
     }
     child(L"STATIC",
-          L"Controller: D-pad or left stick, face buttons, Start and Back work as on a Game Boy. "
-          L"The right shoulder or a trigger fast-forwards. Hold the left shoulder with Start, Back or Y "
-          L"to save, load or change slot.",
-          SS_LEFT, 20, 408, 390, 54, -1);
-    dlg.hint = child(L"STATIC", L"", SS_LEFT, 20, 468, 390, 20, -1);
-    child(L"BUTTON", L"Reset to defaults", BS_PUSHBUTTON | WS_TABSTOP, 20, 488, 140, 28, ID_RESET);
-    dlg.done = child(L"BUTTON", L"Done", BS_DEFPUSHBUTTON | WS_TABSTOP, 300, 488, 110, 28, ID_DONE);
+          L"Controller: D-pad or left stick and the face buttons work as on the console. "
+          L"Game Boy: the right shoulder fast-forwards, the left shoulder is the modifier. "
+          L"DS: the shoulders are L and R, the right trigger fast-forwards, the left trigger is the "
+          L"modifier. Modifier with Start, Back or Y saves, loads or changes slot.",
+          SS_LEFT, 20, 470, 390, 92, -1);
+    dlg.hint = child(L"STATIC", L"", SS_LEFT, 20, 566, 390, 20, -1);
+    child(L"BUTTON", L"Reset to defaults", BS_PUSHBUTTON | WS_TABSTOP, 20, 590, 140, 28, ID_RESET);
+    dlg.done = child(L"BUTTON", L"Done", BS_DEFPUSHBUTTON | WS_TABSTOP, 300, 590, 110, 28, ID_DONE);
     refresh();
 
     bool was_open = g.dialog_open;
@@ -1892,7 +1939,7 @@ DropTarget drop_target;
 /* Reads the controllers: held buttons feed the core, and the state hotkeys fire once
  * per press. Only the focused window listens, so a game in the background isn't played. */
 void poll_pad() {
-    unsigned held = pad_poll();
+    unsigned held = pad_poll(gbi_labeled_buttons(core()));
     const char *note = pad_take_message();
     if (note) set_status(widen(note));
     bool listening = ready() && !g.dialog_open && GetForegroundWindow() == g.hwnd;
@@ -2053,7 +2100,8 @@ int check_features(int base) {
     SendMessageW(g.hwnd, WM_KEYUP, VK_TAB, tab | (LPARAM)(3u << 30));
     if (g.ff_key) return base + 1;
 
-    int stage = check_states(base + 2, true);
+    /* A core without states yet (an early DS) skips the round trip. */
+    int stage = states_ready() ? check_states(base + 2, true) : 0;
     if (stage) return stage;
 
     GbBindings original = g.keys;
@@ -2065,6 +2113,23 @@ int check_features(int base) {
                       memcmp(&parsed, &g.keys, sizeof(parsed)) == 0;
     g.keys = original;
     return round_trip ? 0 : base + 8;
+}
+
+/* A click on a touchscreen core presses and releases its stylus, and a click off the
+ * frame still holds it (at -1, -1) until the button comes up. Returns 0 or base..base+3. */
+int check_pointer(int base) {
+    const NacreCore *c = core();
+    const NacreVideoFrame *frame = current_frame();
+    if (!c || !(c->flags & NACRE_CORE_HAS_POINTER)) return 0;
+    if (!frame || !frame->width) return base;
+    Rect at = frame_rect(well_rect(), frame);
+    LPARAM lower = MAKELPARAM(at.X + at.Width / 2, at.Y + at.Height * 3 / 4);
+    SendMessageW(g.hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lower);
+    if (!g.pointer_down) return base + 1;
+    SendMessageW(g.hwnd, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(0, 0));
+    if (!g.pointer_down) return base + 2;
+    SendMessageW(g.hwnd, WM_LBUTTONUP, 0, lower);
+    return g.pointer_down ? base + 3 : 0;
 }
 
 /* Exercise native actions and the physical key paths before rendering, like the
@@ -2084,6 +2149,7 @@ int run_snapshot() {
         /* Launched with a cartridge: check its keys, run it a while, and capture it. */
         int stage = check_pad_keys(12);
         if (!stage) stage = check_features(16);
+        if (!stage) stage = check_pointer(26);
         if (stage) return stage;
         if (!run_for(g.snapshot_seconds)) return 15;
         invalidate_all();
@@ -2328,7 +2394,20 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         break;
     case WM_LBUTTONDOWN:
         SetFocus(hwnd);
+        send_pointer(lparam, true);
         return 0;
+    case WM_MOUSEMOVE:
+        if (g.pointer_down) send_pointer(lparam, true);
+        return 0;
+    case WM_LBUTTONUP:
+        if (g.pointer_down) send_pointer(lparam, false);
+        return 0;
+    case WM_CAPTURECHANGED:
+        if (g.pointer_down && (HWND)lparam != hwnd) {
+            g.pointer_down = false;
+            if (core() && core()->set_pointer) core()->set_pointer(core_self(), 0, -1, -1, 0);
+        }
+        break;
     case WM_ACTIVATE:
         if (LOWORD(wparam) == WA_INACTIVE) {
             g.focus_paused = true;

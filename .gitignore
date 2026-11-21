@@ -15,3 +15,4 @@ tests/test_demo
 /tests/test_nacre_core
 /tests/test_nacre_session
 /deps/
+/tests/test_nds

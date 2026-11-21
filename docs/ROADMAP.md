@@ -169,6 +169,13 @@ A PS2 core derived from PCSX2 is built in on Windows. docs/PS2.md has the
 interface mapping, the layout and build, how upstream fixes are ported, and the
 current status.
 
+## Nintendo DS
+
+A DS core of our own, from GBATEK, is under way. docs/NDS.md has the plan,
+decisions and milestones. M0 (plumbing) is done: pointer input in the core API,
+DS buttons in the key bindings and gamepad map, late-sized saves, detection, and
+black frames. M1 is the ARM interpreter and direct boot.
+
 ## Suggested implementation settings
 
 | Work | Codex | Claude | Reason |
@@ -177,5 +184,7 @@ current status.
 | Small specified controls or layout changes | Luna, max | Haiku, high | Bounded implementation with visual acceptance |
 | Compatibility and timing design | Sol, xhigh | Opus, high | Interacting machine profiles and state semantics |
 | Game Boy frontend integration | Sol, high | Opus, high | Three shells, audio streaming and save I/O must agree |
+| DS CPUs, 2D and sound (M1-M5) | Sol, xhigh | Opus, high | Large spec-driven core work checked by test ROMs |
+| DS 3D (M6) | Sol, max | Opus, xhigh | Rasterizer quirks with no test suite, checked by oracle diffs |
 
 Keep this document current rather than appending session history.

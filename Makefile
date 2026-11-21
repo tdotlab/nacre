@@ -25,8 +25,10 @@ $(TARGET): $(SOURCES) include/chip8.h include/audio.h include/scheduler.h
 
 GB_SOURCES = src/gb/gb.c src/gb/gb_cpu.c src/gb/gb_ppu.c src/gb/gb_apu.c src/gb/gb_cart.c src/gb/gb_state.c
 GB_HEADERS = include/gb.h src/gb/gb_internal.h
-CORE_SOURCES = src/core/session.c src/core/registry.c src/core/chip8_core.c src/core/gb_core.c src/chip8.c src/scheduler.c src/audio.c $(GB_SOURCES)
-CORE_HEADERS = include/nacre_core.h include/nacre_session.h include/chip8.h include/scheduler.h include/audio.h $(GB_HEADERS)
+NDS_SOURCES = src/nds/nds.c src/nds/nds_cart.c
+NDS_HEADERS = include/nds.h src/nds/nds_internal.h
+CORE_SOURCES = src/core/session.c src/core/registry.c src/core/chip8_core.c src/core/gb_core.c src/core/nds_core.c src/chip8.c src/scheduler.c src/audio.c $(GB_SOURCES) $(NDS_SOURCES)
+CORE_HEADERS = include/nacre_core.h include/nacre_session.h include/chip8.h include/scheduler.h include/audio.h $(GB_HEADERS) $(NDS_HEADERS)
 
 tests/test_scheduler: tests/test_scheduler.c src/chip8.c src/scheduler.c include/chip8.h include/scheduler.h
 	$(CC) -Iinclude $(CFLAGS) -o $@ tests/test_scheduler.c src/chip8.c src/scheduler.c
@@ -43,23 +45,27 @@ tests/test_gb_input: tests/test_gb_input.c src/gb_input.c include/gb_input.h inc
 tests/test_gb: tests/test_gb.c $(GB_SOURCES) $(GB_HEADERS)
 	$(CC) -Iinclude $(CFLAGS) -o $@ tests/test_gb.c $(GB_SOURCES)
 
-tests/test_nacre_core: tests/test_nacre_core.c $(CORE_SOURCES) $(CORE_HEADERS)
+tests/test_nds: tests/test_nds.c tests/nds_test_rom.h $(NDS_SOURCES) $(NDS_HEADERS)
+	$(CC) -Iinclude $(CFLAGS) -o $@ tests/test_nds.c $(NDS_SOURCES)
+
+tests/test_nacre_core: tests/test_nacre_core.c tests/nds_test_rom.h $(CORE_SOURCES) $(CORE_HEADERS)
 	$(CC) -Iinclude $(CFLAGS) -o $@ tests/test_nacre_core.c $(CORE_SOURCES) -lm
 
 tests/test_nacre_session: tests/test_nacre_session.c $(CORE_SOURCES) $(CORE_HEADERS)
 	$(CC) -Iinclude $(CFLAGS) -o $@ tests/test_nacre_session.c $(CORE_SOURCES) -lm
 
 # Game Boy ROM checks are skipped unless tools/get-gb-test-roms.py has fetched them.
-test: tests/test_scheduler tests/test_core tests/test_demo tests/test_gb tests/test_gb_input tests/test_nacre_core tests/test_nacre_session
+test: tests/test_scheduler tests/test_core tests/test_demo tests/test_gb tests/test_gb_input tests/test_nds tests/test_nacre_core tests/test_nacre_session
 	./tests/test_scheduler
 	./tests/test_core
 	./tests/test_demo
 	./tests/test_gb_input
 	./tests/test_gb .roms-cache/gb
+	./tests/test_nds
 	./tests/test_nacre_core
 	./tests/test_nacre_session
 
 clean:
-	rm -f $(TARGET) tests/test_scheduler tests/test_core tests/test_demo tests/test_gb tests/test_gb_input tests/test_nacre_core tests/test_nacre_session
+	rm -f $(TARGET) tests/test_scheduler tests/test_core tests/test_demo tests/test_gb tests/test_gb_input tests/test_nds tests/test_nacre_core tests/test_nacre_session
 
 .PHONY: all clean test

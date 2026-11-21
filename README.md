@@ -1,6 +1,6 @@
 # Nacre
 
-A compact CHIP-8 interpreter with native Mac and Windows apps, a portable SDL3 frontend for Linux, and a terminal interface. All of them use the same C emulator core and sound oscillator. A Game Boy (DMG) core sits alongside it, and all three desktop frontends play Game Boy cartridges. See [Game Boy core](#game-boy-core).
+A compact CHIP-8 interpreter with native Mac and Windows apps, a portable SDL3 frontend for Linux, and a terminal interface. All of them use the same C emulator core and sound oscillator. A Game Boy (DMG) core sits alongside it, and all three desktop frontends play Game Boy cartridges. See [Game Boy core](#game-boy-core). A Nintendo DS core is in progress; see [docs/NDS.md](docs/NDS.md).
 
 ![Nacre Mac interface](screenshots/nacre-macos.png)
 
@@ -74,6 +74,7 @@ bytes, so it still works if the original file was moved.
 | --- | --- | --- | --- |
 | CHIP-8 keypad | `1–4`, `QWER`, `ASDF`, `ZXCV` | Same (by physical key position) | Same |
 | Game Boy buttons | Arrows or `WASD`, `X`/`K` = A, `Z`/`J` = B, `Return` = Start, `Delete` or right `Shift` = Select | Arrows or `WASD`, `X`/`K` = A, `Z`/`J` = B, `Enter` = Start, `Backspace` or right `Shift` = Select | Same |
+| DS X / Y / L / R | `C`/`I`, `V`/`U`, `Q`, `E`; click the lower screen to touch | Same | Same |
 | Game Boy fast-forward | Hold `Tab` (4×, silent) | Same | Same |
 | Game Boy save state / load / next slot | `F5` / `F7` / `F6` (also Session menu) | `F5` / `F7` / `F6` | `F5` / `F7` / `F6` |
 | Rebind Game Boy keys | Session → Controls… (`⌘,`) | Session menu → Controls… | `F10` |
@@ -207,7 +208,8 @@ A controller (anything SDL3 recognises as a gamepad) works with no setup: D-pad 
 stick, east/north for A, south/west for B, Start and Back. A right shoulder button or
 either trigger fast-forwards while held. Holding the left shoulder button turns Start,
 Back and the top face button into save state, load state and next slot. Only the focused,
-unpaused window listens.
+unpaused window listens. For a DS the face buttons map by position (north X, west Y), the
+shoulders are L and R, the right trigger fast-forwards and the left trigger is the modifier.
 
 Save states have four slots, stored beside the ROM as `Tetris.state1` to `Tetris.state4`.
 The bundled demo and ROMs opened without a path have nowhere to put them. A state is

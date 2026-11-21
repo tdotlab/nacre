@@ -11,6 +11,9 @@ the emulated architecture; use Nacre for product branding.
 - Read README.md for current setup, commands, and entry points.
 - Read docs/ARCHITECTURE.md for the source map and frontend boundaries.
 - Read docs/ROADMAP.md for the desktop design, review findings, milestones, and open decisions.
+- Read docs/NDS.md before touching the DS core (`src/nds/`, `src/core/nds_core.c`). It is
+  written from GBATEK, test ROMs and homebrew; never read melonDS, DeSmuME or NooDS source
+  (running them as black-box oracles is fine). Never commit BIOS, firmware or game files.
 - Read docs/PS2.md before touching the PS2 core (`src/core/ps2_core.cpp`, `src/ps2/`, derived from PCSX2). Never commit BIOS or disc images.
 - Keep the emulator core independent of SDL, terminal APIs, and desktop UI code.
 - Game Boy core changes must keep `make test` green with the ROMs from

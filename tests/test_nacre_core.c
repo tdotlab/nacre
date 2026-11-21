@@ -1,7 +1,8 @@
-/* The core interface: registry, detection, table validation, and both built-in
+/* The core interface: registry, detection, table validation, and the built-in
  * cores driven only through their NacreCore tables. */
 
 #include "nacre_core.h"
+#include "nds_test_rom.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -288,6 +289,40 @@ static void gb_checks(void) {
     core->destroy(self);
 }
 
+/* ---- Nintendo DS -------------------------------------------------------- */
+
+static uint8_t nds_rom[NDS_TEST_ROM_SIZE];
+
+static void nds_checks(void) {
+    const NacreCore *core = &nacre_nds_core;
+    const NacreVideoFrame *frame;
+    int loud;
+    size_t frames;
+    void *self = start(core, nds_rom, sizeof nds_rom);
+    if (!self) return;
+    CHECK(core->title(self) && !strcmp(core->title(self), "Nacre Test"));
+    CHECK(core->audio_rate(self) == 48000);
+    CHECK(core->pad_labels[NACRE_PAD_NORTH] && !strcmp(core->pad_labels[NACRE_PAD_NORTH], "X"));
+    CHECK(core->pad_labels[NACRE_PAD_L1] && core->pad_labels[NACRE_PAD_R1]);
+
+    frame = core->video(self);
+    CHECK(frame && frame->format == NACRE_PIXEL_XRGB8888);
+    CHECK(frame && frame->width == 256 && frame->height == 384 && frame->pitch == 1024);
+    CHECK(run_ms(core, self, 100));
+    frame = core->video(self);
+    CHECK(frame && frame->frame_count >= 5 && frame->frame_count <= 6);
+    frames = drain(core, self, &loud);
+    CHECK(frames >= 4700 && frames <= 4900);
+
+    core->set_pad(self, 0, NACRE_PAD_BIT(NACRE_PAD_NORTH) | NACRE_PAD_BIT(NACRE_PAD_L1));
+    core->set_pointer(self, 0, 100, 300, 1);
+    core->set_pointer(self, 0, 100, 50, 1); /* top screen: not a touch */
+    core->set_pointer(self, 0, -1, -1, 0);
+    CHECK(run_ms(core, self, 20));
+    core->set_pad(self, 0, 0);
+    core->destroy(self);
+}
+
 /* ---- registry ----------------------------------------------------------- */
 
 /* A stand-in for a forked emulator: its own threads, its own window, one at a time. */
@@ -346,7 +381,7 @@ static void registry_checks(void) {
         }
         CHECK(nacre_core_by_id(cores[count]->id) == cores[count]);
     }
-    CHECK(count == 2);
+    CHECK(count == 3);
     CHECK(nacre_core_by_id("ps2") == NULL);
     CHECK(nacre_core_by_id(NULL) == NULL);
 
@@ -354,6 +389,8 @@ static void registry_checks(void) {
     CHECK(nacre_core_detect(gb_rom, sizeof gb_rom, sizeof gb_rom, "x.ch8") == &nacre_gb_core);
     CHECK(nacre_core_detect(BEEP, sizeof BEEP, sizeof BEEP, NULL) == &nacre_chip8_core);
     CHECK(nacre_core_detect(BEEP, sizeof BEEP, sizeof BEEP, "beep.ch8") == &nacre_chip8_core);
+    CHECK(nacre_core_detect(nds_rom, sizeof nds_rom, sizeof nds_rom, NULL) == &nacre_nds_core);
+    CHECK(nacre_core_detect(nds_rom, 0x200, 64u << 20, "game.nds") == &nacre_nds_core);
     CHECK(nacre_core_detect(big, sizeof big, sizeof big, NULL) == NULL);
     CHECK(nacre_core_detect(NULL, 0, 0, NULL) == NULL);
     /* A large file is probed from its head alone. */
@@ -375,6 +412,12 @@ static void registry_checks(void) {
     mock.flags |= NACRE_CORE_HAS_STATES;
     CHECK(!nacre_core_validate(&mock, error, sizeof error) && strstr(error, "state"));
     mock = mock_threaded();
+    mock.flags |= NACRE_CORE_HAS_POINTER;
+    CHECK(!nacre_core_validate(&mock, error, sizeof error) && strstr(error, "set_pointer"));
+    mock = mock_threaded();
+    mock.flags |= NACRE_CORE_SAVE_SIZED_LATER;
+    CHECK(!nacre_core_validate(&mock, error, sizeof error) && strstr(error, "battery"));
+    mock = mock_threaded();
     mock.api_version = NACRE_CORE_API_VERSION + 1;
     CHECK(!nacre_core_validate(&mock, error, sizeof error));
     CHECK(!nacre_core_validate(NULL, error, sizeof error));
@@ -382,6 +425,7 @@ static void registry_checks(void) {
 
 int main(void) {
     make_gb_rom();
+    nds_test_make_rom(nds_rom, "Nacre Test\nSecond line");
     registry_checks();
     chip8_audio_checks();
     chip8_video_checks();
@@ -389,6 +433,7 @@ int main(void) {
     chip8_fault_checks();
     chip8_state_checks();
     gb_checks();
+    nds_checks();
     if (failures) {
         printf("test_nacre_core: %d failure(s)\n", failures);
         return 1;

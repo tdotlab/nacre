@@ -36,6 +36,7 @@ typedef struct {
 static const SystemLook LOOKS_BY_SYSTEM[] = {
     {"chip8", YES, "60 HZ TIMERS"},
     {"gb", NO, "59.7 HZ FRAMES"},
+    {"nds", NO, "59.8 HZ FRAMES"},
 };
 static const SystemLook DEFAULT_LOOK = {"", NO, ""};
 
@@ -156,12 +157,13 @@ static int chip_key(unsigned short code) {
 }
 /* Pad keys are bound by physical key code (the same on any layout): arrows and
  * WASD for the D-pad, X/K for A, Z/J for B, Delete or the right Shift for Select,
- * Return or Enter for Start; Tab fast-forwards, F5 and F7 save and load, F6
- * changes the save slot. A keypad system takes its 4x4 block of keys first. */
+ * Return or Enter for Start, C/I for X, V/U for Y, Q and E for L and R (DS only);
+ * Tab fast-forwards, F5 and F7 save and load, F6 changes the save slot. A keypad system takes its 4x4 block of keys first. */
 static const int DEFAULT_KEYS[GBI_COUNT][GBI_KEYS_PER_ACTION] = {
     {124, 2}, {123, 0}, {126, 13}, {125, 1}, /* Right, Left, Up, Down */
     {7, 40}, {6, 38},                        /* A, B */
     {51, 60}, {36, 76},                      /* Select, Start */
+    {8, 34}, {9, 32}, {12, -1}, {14, -1},    /* X, Y, L, R */
     {48, -1}, {96, -1}, {98, -1}, {97, -1},  /* fast-forward, save, load, next slot */
 };
 static NSString *key_name(int code) {
@@ -224,6 +226,9 @@ static BOOL key_reserved(int code) {
     unsigned padHeld, padSeen; /* controller actions now / at the last poll */
     uint32_t padButtons;      /* NACRE_PAD bits the core was last given */
     BOOL ffKey, ffOn;         /* fast-forward key held; fast-forward running */
+    BOOL pointerDown;         /* the mouse is pressed on a touchscreen core */
+    NSRect shownRect;         /* where the last frame was drawn, in view points */
+    unsigned shownWidth, shownHeight;
     int appliedRunning;       /* what the session was last told, -1 for nothing yet */
     unsigned appliedSpeed;
     GbBindings keys;
@@ -278,6 +283,7 @@ static BOOL key_reserved(int code) {
 - (void)showControls:(id)sender;
 - (void)closeControls;
 - (void)drawFrameInWell:(NSRect)well;
+- (void)pointerAt:(NSPoint)point pressed:(BOOL)pressed;
 @end
 
 /* The rebinding sheet: every action with its two keys. */
@@ -317,7 +323,16 @@ static BOOL key_reserved(int code) {
     }
     [super flagsChanged:event];
 }
-- (void)mouseDown:(NSEvent *)event { (void)event; [self.window makeFirstResponder:self]; }
+- (void)mouseDown:(NSEvent *)event {
+    [self.window makeFirstResponder:self];
+    [self.controller pointerAt:[self convertPoint:event.locationInWindow fromView:nil] pressed:YES];
+}
+- (void)mouseDragged:(NSEvent *)event {
+    [self.controller pointerAt:[self convertPoint:event.locationInWindow fromView:nil] pressed:YES];
+}
+- (void)mouseUp:(NSEvent *)event {
+    [self.controller pointerAt:[self convertPoint:event.locationInWindow fromView:nil] pressed:NO];
+}
 - (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender {
     BOOL hasFile = [sender.draggingPasteboard canReadObjectForClasses:@[NSURL.class]
         options:@{NSPasteboardURLReadingFileURLsOnlyKey:@YES}];
@@ -383,16 +398,29 @@ static BOOL key_reserved(int code) {
             keycap(26 + (i % 4) * 44, 444 + (i / 4) * 39, 36,
                    [NSString stringWithFormat:@"%c", host[i]], c->keypadHeld[values[i]] != 0, 12);
     } else {
-        /* A D-pad cross with two face buttons beside it, then Select and Start, each
+        /* A D-pad cross with the face buttons beside it, then Select and Start, each
          * labelled with the keyboard key that presses it; Select and Start also carry
-         * the system's own name for them. */
-        static const struct { int action; NacrePadButton button; int col, row, cols; CGFloat size; } caps[] = {
+         * the system's own name for them. A DS adds X, Y and the shoulders. */
+        typedef struct { int action; NacrePadButton button; int col, row, cols; CGFloat size; } Cap;
+        static const Cap twoButtons[] = {
             {GBI_UP, NACRE_PAD_UP, 1, 0, 1, 15},       {GBI_LEFT, NACRE_PAD_LEFT, 0, 1, 1, 15},
             {GBI_RIGHT, NACRE_PAD_RIGHT, 2, 1, 1, 15}, {GBI_DOWN, NACRE_PAD_DOWN, 1, 2, 1, 15},
             {GBI_A, NACRE_PAD_EAST, 3, 0, 1, 12},      {GBI_B, NACRE_PAD_SOUTH, 3, 1, 1, 12},
             {GBI_SELECT, NACRE_PAD_SELECT, 0, 3, 2, 9}, {GBI_START, NACRE_PAD_START, 2, 3, 2, 9},
         };
-        for (size_t i = 0; i < sizeof(caps) / sizeof(caps[0]); i++) {
+        static const Cap fourButtons[] = {
+            {GBI_L, NACRE_PAD_L1, 0, 0, 1, 12},        {GBI_UP, NACRE_PAD_UP, 1, 0, 1, 15},
+            {GBI_R, NACRE_PAD_R1, 2, 0, 1, 12},        {GBI_X, NACRE_PAD_NORTH, 3, 0, 1, 12},
+            {GBI_LEFT, NACRE_PAD_LEFT, 0, 1, 1, 15},   {GBI_RIGHT, NACRE_PAD_RIGHT, 2, 1, 1, 15},
+            {GBI_A, NACRE_PAD_EAST, 3, 1, 1, 12},      {GBI_DOWN, NACRE_PAD_DOWN, 1, 2, 1, 15},
+            {GBI_Y, NACRE_PAD_WEST, 2, 2, 1, 12},      {GBI_B, NACRE_PAD_SOUTH, 3, 2, 1, 12},
+            {GBI_SELECT, NACRE_PAD_SELECT, 0, 3, 2, 9}, {GBI_START, NACRE_PAD_START, 2, 3, 2, 9},
+        };
+        BOOL four = core && core->pad_labels[NACRE_PAD_NORTH] && core->pad_labels[NACRE_PAD_WEST] &&
+                    core->pad_labels[NACRE_PAD_L1] && core->pad_labels[NACRE_PAD_R1];
+        const Cap *caps = four ? fourButtons : twoButtons;
+        size_t capCount = four ? sizeof(fourButtons) / sizeof(fourButtons[0]) : sizeof(twoButtons) / sizeof(twoButtons[0]);
+        for (size_t i = 0; i < capCount; i++) {
             NSString *label = short_key(first_key(&c->keys, caps[i].action));
             if (caps[i].button == NACRE_PAD_SELECT || caps[i].button == NACRE_PAD_START) {
                 const char *named = core ? core->pad_labels[caps[i].button] : NULL;
@@ -415,6 +443,11 @@ static BOOL key_reserved(int code) {
                  short_key(first_key(&c->keys, GBI_LOAD_STATE)), (long)c.slot + 1],
              NSMakeRect(26, hintY + 16, 190, 18), 10, NSFontWeightRegular, 0x7F847A, NO);
         hintY += 32;
+    }
+    if (core && (core->flags & NACRE_CORE_HAS_POINTER)) {
+        text(@"Click the lower screen to touch", NSMakeRect(26, hintY, 190, 18), 10,
+             NSFontWeightRegular, 0x7F847A, NO);
+        hintY += 16;
     }
     text(@"Space to pause  ·  M to mute", NSMakeRect(26, hintY, 190, 18), 10,
          NSFontWeightRegular, 0x7F847A, NO);
@@ -478,8 +511,9 @@ static BOOL key_reserved(int code) {
 @implementation NacreControlsView {
     NSButton *restoreButton, *doneButton;
 }
+#define CONTROLS_ROW 27
 static NSRect cell_rect(int row, int slot) {
-    return NSMakeRect(slot ? 360 : 200, 104 + row * 31, 140, 25);
+    return NSMakeRect(slot ? 360 : 200, 104 + row * CONTROLS_ROW, 140, 23);
 }
 - (BOOL)isFlipped { return YES; }
 - (BOOL)acceptsFirstResponder { return YES; }
@@ -487,9 +521,9 @@ static NSRect cell_rect(int row, int slot) {
     self = [super initWithFrame:frame];
     if (!self) return nil;
     restoreButton = [NSButton buttonWithTitle:@"Restore defaults" target:self action:@selector(restore:)];
-    restoreButton.frame = NSMakeRect(24, 558, 150, 30);
+    restoreButton.frame = NSMakeRect(24, 640, 150, 30);
     doneButton = [NSButton buttonWithTitle:@"Done" target:self action:@selector(done:)];
-    doneButton.frame = NSMakeRect(frame.size.width - 124, 558, 100, 30);
+    doneButton.frame = NSMakeRect(frame.size.width - 124, 640, 100, 30);
     [self addSubview:restoreButton]; [self addSubview:doneButton];
     return self;
 }
@@ -512,9 +546,9 @@ static NSRect cell_rect(int row, int slot) {
     text(@"KEY 1", NSMakeRect(200, 82, 140, 14), 9, NSFontWeightSemibold, 0x83867D, YES);
     text(@"KEY 2", NSMakeRect(360, 82, 140, 14), 9, NSFontWeightSemibold, 0x83867D, YES);
     for (int row = 0; row < GBI_COUNT; row++) {
-        CGFloat y = 104 + row * 31;
-        if (row == GBI_BUTTONS) fill(NSMakeRect(28, y - 4, 472, 1), 0xD8D8CF, 0);
-        text([NSString stringWithUTF8String:gbi_name((GbInput)row)], NSMakeRect(28, y + 4, 160, 18), 12,
+        CGFloat y = 104 + row * CONTROLS_ROW;
+        if (row == GBI_BUTTONS) fill(NSMakeRect(28, y - 2, 472, 1), 0xD8D8CF, 0);
+        text([NSString stringWithUTF8String:gbi_name((GbInput)row)], NSMakeRect(28, y + 3, 160, 18), 12,
              NSFontWeightMedium, 0x4A544B, NO);
         for (int slot = 0; slot < GBI_KEYS_PER_ACTION; slot++) {
             NSRect rect = cell_rect(row, slot);
@@ -526,17 +560,19 @@ static NSRect cell_rect(int row, int slot) {
                 [color(0x587668) setStroke]; outline.lineWidth = 1.5; [outline stroke];
             }
             NSString *label = here && self.capturing ? @"Press a key…" : key_name(c->keys.key[row][slot]);
-            text_aligned(label, NSInsetRect(rect, 6, 5), 12, NSFontWeightMedium,
+            text_aligned(label, NSInsetRect(rect, 6, 4), 12, NSFontWeightMedium,
                          here && self.capturing ? 0x355A43 : 0x3A463E, NO, NSTextAlignmentCenter);
         }
     }
-    if (self.note) text(self.note, NSMakeRect(28, 478, 480, 16), 11, NSFontWeightMedium, 0xB66C52, NO);
-    text(@"Controller: D-pad or left stick, face buttons for A and B, Start and Back.",
-         NSMakeRect(28, 500, 490, 16), 10, NSFontWeightRegular, 0x7F847A, NO);
-    text(@"Right shoulder or either trigger: fast-forward (hold).",
-         NSMakeRect(28, 516, 490, 16), 10, NSFontWeightRegular, 0x7F847A, NO);
-    text(@"Left shoulder held + Start, Back or the top button: save, load, next slot.",
-         NSMakeRect(28, 532, 490, 16), 10, NSFontWeightRegular, 0x7F847A, NO);
+    if (self.note) text(self.note, NSMakeRect(28, 540, 480, 16), 11, NSFontWeightMedium, 0xB66C52, NO);
+    text(@"Controller: D-pad or left stick, face buttons by position, Start and Back.",
+         NSMakeRect(28, 562, 490, 16), 10, NSFontWeightRegular, 0x7F847A, NO);
+    text(@"Game Boy: right shoulder or either trigger fast-forwards; the left shoulder is the modifier.",
+         NSMakeRect(28, 578, 490, 16), 10, NSFontWeightRegular, 0x7F847A, NO);
+    text(@"DS: the shoulders are L and R; the right trigger fast-forwards, the left is the modifier.",
+         NSMakeRect(28, 594, 490, 16), 10, NSFontWeightRegular, 0x7F847A, NO);
+    text(@"Modifier held + Start, Back or the top button: save, load, next slot.",
+         NSMakeRect(28, 610, 490, 16), 10, NSFontWeightRegular, 0x7F847A, NO);
 }
 - (void)mouseDown:(NSEvent *)event {
     NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
@@ -669,6 +705,23 @@ static NSRect cell_rect(int row, int slot) {
     }
     kbHeld = 0; padHeld = 0; ffKey = NO; padButtons = 0;
     if ([self hasPad]) [self core]->set_pad([self instance], 0, 0);
+    if (pointerDown && [self core] && [self core]->set_pointer) [self core]->set_pointer([self instance], 0, -1, -1, 0);
+    pointerDown = NO;
+}
+/* A click on a touchscreen core goes to it in the pixels of its frame; off the
+ * frame is -1, -1. */
+- (void)pointerAt:(NSPoint)point pressed:(BOOL)pressed {
+    const NacreCore *core = [self core];
+    if (!core || !(core->flags & NACRE_CORE_HAS_POINTER)) return;
+    if (pressed && !pointerDown && ([self paused] || self.dialogOpen)) return;
+    if (!pressed && !pointerDown) return;
+    int fx = -1, fy = -1;
+    if (shownRect.size.width > 0 && shownRect.size.height > 0 && NSPointInRect(point, shownRect)) {
+        fx = (int)((point.x - shownRect.origin.x) / shownRect.size.width * shownWidth);
+        fy = (int)((point.y - shownRect.origin.y) / shownRect.size.height * shownHeight);
+    }
+    pointerDown = pressed;
+    core->set_pointer([self instance], 0, fx, fy, pressed ? 1 : 0);
 }
 /* A bound key was pressed. Pad buttons reach the core; fast-forward and the state
  * keys work for any game. */
@@ -713,7 +766,7 @@ static NSRect cell_rect(int row, int slot) {
 /* Reads the controllers: held buttons feed the core, and the state hotkeys fire once
  * per press. Only the focused window listens, so a game in the background isn't played. */
 - (void)pollPad {
-    unsigned held = pad_poll();
+    unsigned held = pad_poll(gbi_labeled_buttons([self core]));
     const char *note = pad_take_message();
     if (note) [self setStatus:[NSString stringWithUTF8String:note]];
     BOOL listening = [self ready] && !self.dialogOpen && self.window.isKeyWindow;
@@ -832,7 +885,7 @@ static NSRect cell_rect(int row, int slot) {
 - (void)showControls:(id)sender {
     (void)sender;
     if (self.dialogOpen || self.controlsSheet) return;
-    NSRect frame = NSMakeRect(0, 0, 540, 600);
+    NSRect frame = NSMakeRect(0, 0, 540, 684);
     NSWindow *sheet = [[NSWindow alloc] initWithContentRect:frame styleMask:NSWindowStyleMaskTitled
                                                     backing:NSBackingStoreBuffered defer:NO];
     sheet.appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
@@ -874,6 +927,9 @@ static NSRect cell_rect(int row, int slot) {
     }
     CGFloat ox = floor(NSMidX(well) - w / 2), oy = floor(NSMidY(well) - h / 2);
     const uint8_t *pixels = frame->pixels;
+    shownRect = NSMakeRect(ox, oy, w, h);
+    shownWidth = frame->width;
+    shownHeight = frame->height;
 
     if (frame->format == NACRE_PIXEL_INDEX8 && frame->levels <= 2 && frame->aspect <= 0) {
         [[NSGraphicsContext currentContext] setShouldAntialias:NO];

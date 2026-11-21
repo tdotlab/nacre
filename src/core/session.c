@@ -130,13 +130,15 @@ void nacre_session_destroy(NacreSession *session) {
 }
 
 /* Finds the battery save beside the content and loads it. A file that doesn't
- * fit is left alone rather than overwritten. */
+ * fit is left alone rather than overwritten. A core that sizes its save later
+ * gets the file even while it reports no save yet. */
 static void attach_save(NacreSession *session) {
     const NacreCore *core = session->core;
     uint8_t *data = NULL;
     size_t size = 0;
     NacreIoResult result;
-    if (!session->path || !core->save_size || !core->save_size(session->self)) return;
+    if (!session->path || !core->save_size) return;
+    if (!core->save_size(session->self) && !(core->flags & NACRE_CORE_SAVE_SIZED_LATER)) return;
     session->save_path = sibling(session->path, ".sav");
     if (!session->save_path) return;
     set_clock(session);

@@ -211,6 +211,37 @@ static void save_checks(void) {
     CHECK(writes == 0);
 }
 
+/* A core that only learns its save size once the game runs (a DS cart) still
+ * gets the save file at load; one that has no save and doesn't say so doesn't. */
+static size_t late_loaded;
+static size_t late_size(void *self) { (void)self; return 0; }
+static int late_load(void *self, const uint8_t *data, size_t size) {
+    (void)self;
+    (void)data;
+    late_loaded = size;
+    return 1;
+}
+
+static void late_save_checks(void) {
+    char error[256];
+    NacreCore late = nacre_gb_core;
+    NacreSession *s;
+    late.save_size = late_size;
+    late.save_load = late_load;
+
+    wipe();
+    put("/g/Late.sav", (const uint8_t *)"0123456789", 10);
+    s = session_new(1);
+    late_loaded = 0;
+    CHECK(nacre_session_open(s, &late, "/g/Late.gb", gb_rom, sizeof gb_rom, error, sizeof error));
+    CHECK(late_loaded == 0); /* not flagged: a cart without a save */
+    late.flags |= NACRE_CORE_SAVE_SIZED_LATER;
+    CHECK(nacre_session_open(s, &late, "/g/Late.gb", gb_rom, sizeof gb_rom, error, sizeof error));
+    CHECK(late_loaded == 10);
+    CHECK(!strcmp(nacre_session_save_note(s), "Loaded Late.sav"));
+    nacre_session_destroy(s);
+}
+
 static void rollback_checks(void) {
     char error[256];
     static uint8_t junk[8192];
@@ -426,6 +457,7 @@ static void singleton_checks(void) {
 int main(void) {
     make_gb_rom();
     save_checks();
+    late_save_checks();
     rollback_checks();
     state_checks();
     option_and_run_checks();
