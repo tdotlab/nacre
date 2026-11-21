@@ -5,12 +5,15 @@
 // boots a disc in a plain Win32 window. Built with NACRE_PS2 (target nacre-ps2-smoke),
 // beside Nacre.exe so it finds the same DLLs and resources.
 //
-//   nacre-ps2-smoke <disc> <bios-dir> [seconds=20] [capture.bmp] [rounds=1]
+//   nacre-ps2-smoke <disc> <bios-dir> [seconds=20] [capture.bmp] [rounds=1] [toggles=0]
 //
 // Checks: the table is registered and valid, a VM starts, frames are presented, pausing stops frame
 // production and resuming restarts it, audio arrives at the core's rate and is not
-// silent, and the core tears down (and boots again when rounds > 1). With a capture
-// path, the last round also writes the second half's audio beside it as .wav.
+// silent, and the core tears down promptly (and boots again when rounds > 1). With a
+// capture path, the last round also writes the second half's audio beside it as .wav.
+// With toggles, each round then pauses and resumes that many times at random gaps,
+// resizing the window and re-attaching the surface every fifth time, and checks that
+// no call holds the calling (window) thread. Odd rounds tear down while paused.
 // Prints PASS or FAIL lines and exits non-zero on failure.
 
 #ifndef _WIN32
@@ -95,7 +98,8 @@ static void Check(bool ok, const char* what)
 static void HostLogCb(void*, NacreLogLevel level, const char* message)
 {
 	static const char* names[] = {"debug", "info", "warn", "error"};
-	std::printf("  [%s] %s\n", names[level & 3], message);
+	std::printf("  %6llu [%s] %s\n", static_cast<unsigned long long>(GetTickCount64() % 1000000), names[level & 3],
+		message);
 }
 
 static void HostWake(void*) {}
@@ -176,8 +180,53 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 	return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
+// Milliseconds a call takes on this (the window's) thread.
+template <typename F>
+static unsigned TimeMs(F&& f)
+{
+	const ULONGLONG t0 = GetTickCount64();
+	f();
+	return static_cast<unsigned>(GetTickCount64() - t0);
+}
+
+// Pause and resume at random gaps, with a resize and surface re-attach every fifth
+// time, the way a user and the frontend mix them. Reports the slowest of each call.
+static void Toggle(const NacreCore* core, void* self, HWND hwnd, int toggles, unsigned seed)
+{
+	std::srand(seed);
+	unsigned worst_pause = 0, worst_resume = 0, worst_attach = 0;
+	for (int i = 0; i < toggles; i++)
+	{
+		worst_pause = std::max(worst_pause, TimeMs([&] { core->set_running(self, 0); }));
+		Pump(static_cast<DWORD>(std::rand() % 300));
+		if (i % 5 == 4)
+		{
+			const bool big = (i / 5) % 2 == 0;
+			SetWindowPos(hwnd, nullptr, 0, 0, big ? 1500 : 1000, big ? 1050 : 720, SWP_NOMOVE | SWP_NOZORDER);
+			RECT rc;
+			GetClientRect(hwnd, &rc);
+			NacreSurface surface{};
+			surface.kind = NACRE_SURFACE_WIN32_HWND;
+			surface.handle = hwnd;
+			surface.width = static_cast<unsigned>(rc.right);
+			surface.height = static_cast<unsigned>(rc.bottom);
+			surface.scale = 1.0f;
+			char err[256] = {};
+			worst_attach = std::max(worst_attach, TimeMs([&] { core->attach_surface(self, &surface, err, sizeof(err)); }));
+			Pump(static_cast<DWORD>(std::rand() % 200));
+		}
+		worst_resume = std::max(worst_resume, TimeMs([&] { core->set_running(self, 1); }));
+		Pump(static_cast<DWORD>(std::rand() % 300));
+	}
+	std::printf("  %d toggles: slowest pause %u ms, resume %u ms, re-attach %u ms\n", toggles, worst_pause,
+		worst_resume, worst_attach);
+	Check(worst_pause < 500, "pause is prompt");
+	Check(worst_resume < 500, "resume is prompt");
+	Check(worst_attach < 500, "re-attach is prompt");
+}
+
 static bool RunRound(const NacreCore* core, HWND hwnd, const char* disc, const char* bios_dir, int seconds,
-	const char* capture)
+	const char* capture, int round, int toggles)
 {
 	NacreHost host{};
 	host.system_dir = bios_dir;
@@ -290,9 +339,19 @@ static bool RunRound(const NacreCore* core, HWND hwnd, const char* disc, const c
 		std::printf("  %s (%.1f s)\n", wav.c_str(), g_audio_recorded.size() / 2.0 / audio_rate);
 	}
 
+	if (toggles > 0)
+		Toggle(core, self, hwnd, toggles, 1234u + static_cast<unsigned>(round));
+
+	const bool paused_teardown = round % 2 == 1;
+	if (paused_teardown)
+	{
+		core->set_running(self, 0);
+		Pump(300);
+	}
 	g_self = nullptr;
-	core->destroy(self);
-	Check(true, "destroy returned");
+	const unsigned destroy_ms = TimeMs([&] { core->destroy(self); });
+	std::printf("  destroy (%s) took %u ms\n", paused_teardown ? "paused" : "running", destroy_ms);
+	Check(destroy_ms < 1000, "destroy is prompt");
 	return true;
 }
 
@@ -300,7 +359,7 @@ int main(int argc, char** argv)
 {
 	if (argc < 3)
 	{
-		std::fprintf(stderr, "usage: %s <disc> <bios-dir> [seconds] [capture.bmp] [rounds]\n", argv[0]);
+		std::fprintf(stderr, "usage: %s <disc> <bios-dir> [seconds] [capture.bmp] [rounds] [toggles]\n", argv[0]);
 		return 2;
 	}
 	const char* disc = argv[1];
@@ -308,6 +367,7 @@ int main(int argc, char** argv)
 	const int seconds = argc > 3 ? std::max(2, std::atoi(argv[3])) : 20;
 	const char* capture = argc > 4 ? argv[4] : nullptr;
 	const int rounds = argc > 5 ? std::max(1, std::atoi(argv[5])) : 1;
+	const int toggles = argc > 6 ? std::max(0, std::atoi(argv[6])) : 0;
 
 	std::setvbuf(stdout, nullptr, _IONBF, 0); // progress shows even if a step hangs
 	SetProcessDPIAware();
@@ -357,7 +417,7 @@ int main(int argc, char** argv)
 	for (int i = 0; i < rounds; i++)
 	{
 		std::printf("round %d\n", i + 1);
-		if (!RunRound(core, hwnd, disc, bios_dir, seconds, i == rounds - 1 ? capture : nullptr))
+		if (!RunRound(core, hwnd, disc, bios_dir, seconds, i == rounds - 1 ? capture : nullptr, i, toggles))
 			break;
 	}
 

@@ -101,7 +101,7 @@ From a VS x64 developer prompt (VS 18 Build Tools works):
 ```
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DDISABLE_ADVANCE_SIMD=ON
 cmake --build build --target nacre-desktop nacre-ps2-smoke
-build\nacre-ps2-smoke.exe <disc> <bios-dir> [seconds] [capture.bmp] [rounds]
+build\nacre-ps2-smoke.exe <disc> <bios-dir> [seconds] [capture.bmp] [rounds] [toggles]
 ```
 
 With PS2 on, a post-build step copies the bundle's DLLs (zstd, shaderc, ffmpeg,
@@ -113,7 +113,12 @@ audio are off, so it never opens devices behind Nacre's back.
 
 `nacre-ps2-smoke` gets the core from the registry like a frontend, boots a disc
 in a Win32 window, checks frames, audio rate and level, pause/resume and
-teardown, and saves a capture plus the audio as a `.wav` beside it.
+teardown, and saves a capture plus the audio as a `.wav` beside it. Each round
+times `destroy` (under 1 s passes) and odd rounds tear down while paused. With
+`toggles`, each round also pauses and resumes that many times at random gaps,
+resizing and re-attaching the surface every fifth time, and checks no call holds
+the window thread for 500 ms. Pass a real capture path when giving later
+arguments: PowerShell drops an empty `""`.
 
 The dependency bundle comes from `tools/ps2-deps/build-dependencies.bat`, which
 builds into `deps\ps2-build` and installs into `deps\ps2`. It still builds Qt,
@@ -169,6 +174,18 @@ resize, pause and full screen, and closes in about 170 ms. In 24 interleaved
 runs against the old plugin build, switching to the demo took 306-337 ms in
 both. `Nacre --snapshot` passes with and without `NACRE_PS2`.
 
+**Teardown stall fixed (2026-11-20).** Leaving a PS2 game sometimes froze the
+window for 1 to 5 s. The smoke test reproduced it in about one `destroy` in
+seven, running or paused, without any pause toggling. Timestamps inside
+`VMManager::Shutdown` put all of it in `vtlb_Shutdown` unmapping fastmem views
+(see the `vtlb.cpp` change below). After the fix, on the same machine: 40 smoke
+rounds with 8 pause/resume/resize toggles each pass every check, `destroy` takes
+78-344 ms (median 94, was 266 with spikes to 4.8 s), and pause, resume and
+re-attach never hold the window thread over 16 ms. In 12 app runs, switching to
+the demo took 106-151 ms (was about 280) and closing 198-321 ms (was about 165):
+the retired area finishes unmapping while the process exits, after the window is
+gone.
+
 The core covers threaded run/pause on its own CPU thread (a command queue
 drained at vsync), native-surface attach and resize, DualShock 2 buttons and
 sticks, speed (`Nominal`/`Turbo`/`Slomo`), title, BIOS choice, and the options
@@ -184,6 +201,12 @@ Changes from PCSX2 beyond moving it into Nacre's tree:
 - A few includes that named the old `pcsx2/` folder are relative now.
 - `vtlb.cpp`: install the page-fault handler once per process. Upstream
   assumes one VM-memory allocation per process and asserts on the second boot.
+- `vtlb.cpp`: VM shutdown hands the fastmem area, views still mapped, to a
+  detached thread that unmaps and releases it, and carries on with a fresh empty
+  area (`vtlb_RetireFastmemArea`); the next `vtlb_Core_Alloc` waits for it. Each
+  fastmem view is one page and a VM maps 49,688 of them; on Windows the same
+  unmaps took 0.1 s in most teardowns and 2.5 to 3.8 s in some, with the
+  frontend's window thread waiting in `destroy`.
 - `SPU2/spu2.h`, `spu2.cpp`: `SPU2::SetOutputStreamFactory`, a host-supplied
   output stream that replaces the configured backend.
 
@@ -198,10 +221,6 @@ Known issues:
 - PCSX2 empties the audio ring from the CPU thread when the speed changes
   (`SPU2::OnTargetSpeedChanged`), which races the reader as it does with
   PCSX2's own device backends. Worst case is one burst of stale audio.
-- Switching away from a PS2 game after a pause took 0.95, 2.6 and 4.3 s in three
-  of the first ~20 runs after the first built-in build, and never in the 24 runs
-  after (either build). Cause unknown. One suspect: `set_running(0)` spins until
-  the CPU thread parks without letting sent messages through.
 - Not checked: sustained play, memory growth over many rounds, Vulkan and
   OpenGL, other games, PSX-mode (44.1 kHz) audio.
 

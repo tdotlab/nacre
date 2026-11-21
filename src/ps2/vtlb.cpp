@@ -32,7 +32,10 @@
 #include "GS/GSVector.h"
 
 #include <bit>
+#include <condition_variable>
 #include <map>
+#include <mutex>
+#include <thread>
 #include <unordered_set>
 #include <unordered_map>
 
@@ -1003,6 +1006,77 @@ static void vtlb_RemoveFastmemMappings(u32 vaddr, u32 size)
 		vtlb_RemoveFastmemMapping(vaddr);
 }
 
+// Nacre: hands the fastmem area, with every view still mapped, to a background thread that
+// unmaps and releases it. Each view is one page, a VM maps about 50,000 of them, and on
+// Windows every UnmapViewOfFile2 is a TLB flush on all cores: the same 49,688 unmaps took
+// 0.1 s in most teardowns and 2.5 to 3.8 s in some, with the host's window thread waiting
+// on it. Nothing touches a stopped VM's fastmem area, so the unmapping can finish late.
+// With replace, carries on with a fresh, empty area at a new base (the recompiler reads
+// vtlbdata.fastmem_base when it enters generated code, and a boot resets it anyway).
+// The thread is detached; its sync objects are never destroyed, so it can outlive statics.
+static std::mutex& s_retired_mutex = *new std::mutex;
+static std::condition_variable& s_retired_cv = *new std::condition_variable;
+static int s_retired_areas = 0;
+
+static void vtlb_RemoveFastmemMappings();
+
+static void vtlb_RetireFastmemArea(bool replace)
+{
+	if (!s_fastmem_area || s_fastmem_virtual_mapping.empty())
+		return;
+
+	std::vector<u8*> pages;
+	for (u32 page = 0; page < FASTMEM_PAGE_COUNT; page++)
+	{
+		if (s_fastmem_virtual_mapping[page] != NO_FASTMEM_MAPPING && vtlb_IsHostCoalesced(page))
+			pages.push_back(s_fastmem_area->PagePointer(vtlb_HostPage(page)));
+	}
+	if (pages.empty())
+		return;
+
+	std::unique_ptr<SharedMemoryMappingArea> fresh;
+	if (replace)
+	{
+		fresh = SharedMemoryMappingArea::Create(FASTMEM_AREA_SIZE);
+		if (!fresh)
+		{
+			vtlb_RemoveFastmemMappings(); // no address space for a second area: unmap here
+			return;
+		}
+	}
+
+	std::fill(s_fastmem_virtual_mapping.begin(), s_fastmem_virtual_mapping.end(), NO_FASTMEM_MAPPING);
+	s_fastmem_physical_mapping.clear();
+	std::unique_ptr<SharedMemoryMappingArea> old = std::move(s_fastmem_area);
+	s_fastmem_area = std::move(fresh);
+	vtlbdata.fastmem_base = s_fastmem_area ? (uptr)s_fastmem_area->BasePointer() : 0;
+
+	{
+		std::lock_guard lock(s_retired_mutex);
+		s_retired_areas++;
+	}
+	std::thread([old = std::move(old), pages = std::move(pages)]() mutable {
+		for (u8* page : pages)
+		{
+			if (!old->Unmap(page, __pagesize))
+				Console.Error("Failed to unmap retired fastmem page %p", page);
+		}
+		old.reset();
+		{
+			std::lock_guard lock(s_retired_mutex);
+			s_retired_areas--;
+		}
+		s_retired_cv.notify_all();
+	}).detach();
+}
+
+// Waits until every retired area is released, so retired areas never pile up.
+static void vtlb_WaitForRetiredFastmem()
+{
+	std::unique_lock lock(s_retired_mutex);
+	s_retired_cv.wait(lock, []() { return s_retired_areas == 0; });
+}
+
 static void vtlb_RemoveFastmemMappings()
 {
 	if (s_fastmem_virtual_mapping.empty())
@@ -1283,7 +1357,7 @@ void vtlb_Reset()
 
 void vtlb_Shutdown()
 {
-	vtlb_RemoveFastmemMappings();
+	vtlb_RetireFastmemArea(true); // Nacre: was vtlb_RemoveFastmemMappings()
 	s_fastmem_backpatch_info.clear();
 	s_fastmem_faulting_pcs.clear();
 }
@@ -1328,6 +1402,7 @@ bool vtlb_Core_Alloc()
 	static_assert(HostMemoryMap::VTLBVirtualMapSize == VMAP_SIZE);
 
 	pxAssert(!vtlbdata.vmap && !vtlbdata.fastmem_base && !s_fastmem_area);
+	vtlb_WaitForRetiredFastmem(); // Nacre: the last VM's area, normally long gone
 
 	vtlbdata.vmap = reinterpret_cast<VTLBVirtual*>(SysMemory::GetVTLBVirtualMap());
 
@@ -1380,7 +1455,7 @@ void vtlb_Core_Free()
 	vtlbdata.vmap = nullptr;
 	vtlbdata.ppmap = nullptr;
 
-	vtlb_RemoveFastmemMappings();
+	vtlb_RetireFastmemArea(false); // Nacre: was vtlb_RemoveFastmemMappings()
 	vtlb_ClearLoadStoreInfo();
 
 	vtlbdata.fastmem_base = 0;
