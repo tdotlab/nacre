@@ -265,6 +265,9 @@ int nacre_core_validate(const NacreCore *core, char *error, size_t error_capacit
 /* The built-in tables. */
 extern const NacreCore nacre_chip8_core;
 extern const NacreCore nacre_gb_core;
+#ifdef NACRE_HAVE_PS2
+extern const NacreCore nacre_ps2_core; /* src/core/ps2_core.cpp, built with NACRE_PS2 */
+#endif
 
 #ifdef __cplusplus
 }

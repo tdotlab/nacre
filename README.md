@@ -235,13 +235,17 @@ make test                           # includes tests/test_gb (116 ROM checks + b
 
 ## PS2 core (Windows, experimental)
 
-A PS2 core built on [PCSX2](https://github.com/PCSX2/pcsx2) lives in
-`third_party/pcsx2/` as a separate plugin, `nacre_ps2.dll`. The normal build does
-not touch it. The Windows app loads plugins from `cores\<name>\` beside
-`Nacre.exe` or from the folders in `NACRE_CORE_DIRS`, then opens PS2 disc images
-(`.iso`, `.chd`, `.cso`) like any other game. You supply a PS2 BIOS: point
-File > System Files Folder at the folder that holds it. Build steps, status and
-known issues are in [docs/PS2.md](docs/PS2.md).
+Nacre has a PS2 core, `src/core/ps2_core.cpp` over the emulator in `src/ps2/`,
+which is derived from [PCSX2](https://pcsx2.net) by the PCSX2 Dev Team. It is a
+built-in core like Game Boy: the Windows app opens PS2 disc images (`.iso`,
+`.chd`, `.cso`) like any other game. You supply a PS2 BIOS: point File > System
+Files Folder at the folder that holds it.
+
+The core needs a prebuilt dependency bundle in `deps/ps2` (built by
+`tools/ps2-deps/build-dependencies.bat`). When it is there, a Windows CMake build
+includes PS2 (`NACRE_PS2`, on by default) and copies the bundle's DLLs and
+resources beside `Nacre.exe`; without it, the build is the usual CHIP-8 and Game
+Boy app. Build steps, status and known issues are in [docs/PS2.md](docs/PS2.md).
 
 ## License
 
@@ -252,7 +256,10 @@ any later version. It comes with no warranty. Every build ships the license text
 `LICENSE` beside the app, and the source is this repository.
 
 The apps statically link SDL3 (zlib license, compatible with the GPL), whose notice
-ships beside them as `THIRD_PARTY_NOTICES.txt`. Downloaded game ROMs in
+ships beside them as `THIRD_PARTY_NOTICES.txt`. The PS2 core is derived from
+PCSX2 (GPL-3.0-or-later, copyright the PCSX2 Dev Team); the PCSX2 release it
+came from is recorded in `src/ps2/UPSTREAM`, and the libraries it uses are listed
+in `PS2_THIRD_PARTY_LICENSES.html`, shipped beside a PS2 build. Downloaded game ROMs in
 `.roms-cache/` belong to their own authors and are not covered by this license.
 
 Nacre was MIT licensed until 2026-11-17. Copies obtained from earlier commits stay

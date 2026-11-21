@@ -24,14 +24,16 @@ audio devices.
 | `tests/test_gb.c`, `tools/get-gb-test-roms.py` | ROM-driven core checks; headless run/dump/press tool |
 | `src/macos/main.m` | ARC-managed AppKit app: native menus/panels, drawn sidebar and display, rebinding sheet; runs every registered core through a session, with the same per-system look table as Windows |
 | `src/macos/Info.plist.in` | Mac identity, version, document associations, OS requirement |
-| `src/windows/main.cpp` | Win32 + GDI+ app: window, owner-drawn controls, menus, dialogs, drop target, registry prefs; runs every registered core through a session, with per-system looks (keypad or pad, speed in Hz or ×) keyed by core id; loads plugin cores (`cores\<name>\nacre_*.dll`, `NACRE_CORE_DIRS`) and gives native-video ones a child window in the display well |
-| `third_party/pcsx2/` | PCSX2 as a squashed git subtree; `pcsx2-nacre/` is the PS2 adapter, built as the `nacre_ps2.dll` plugin (see docs/PS2.md) |
+| `src/windows/main.cpp` | Win32 + GDI+ app: window, owner-drawn controls, menus, dialogs, drop target, registry prefs; runs every registered core through a session, with per-system looks (keypad or pad, speed in Hz or ×) keyed by core id; gives native-video cores a child window in the display well |
+| `src/core/ps2_core.cpp` | The PS2 core's `NacreCore` table (`nacre_ps2_core`), built with `NACRE_PS2` (see docs/PS2.md) |
+| `src/ps2/`, `cmake/ps2/` | The PS2 emulator and its build, derived from PCSX2; `src/ps2/CMakeLists.txt` keeps PCSX2's compiler settings inside that directory |
+| `third_party/` | Libraries the PS2 core builds from source (fmt, imgui, xbyak, ...) |
 | `src/windows/branding.h` | Shell mark and icon geometry (same shapes as the Mac header), shared by the app and the icon tool |
 | `src/windows/nacre.rc.in`, `nacre.manifest` | Embedded icon and welcome ROM, version info; comctl32 v6, PerMonitorV2 DPI |
 | `tools/windows-icon.cpp` | Build-time generator of `Nacre.ico` (PNG frames, 16–256 px) |
 | `src/desktop/main.c` | SDL3 window/input/file picker/drop for Linux; runs every registered core through a session and knows no system itself |
 | `src/main.c` | Terminal and headless CLI |
-| `CMakeLists.txt` | Platform selection, static SDL3, bundle/resources, Windows icon/rc/manifest |
+| `CMakeLists.txt` | Platform selection, static SDL3, bundle/resources, Windows icon/rc/manifest; `NACRE_PS2` adds the PS2 core and copies its DLLs and resources beside the app |
 | `.github/workflows/desktop.yml` | OS builds, universal Mac artifact, native UI smoke capture on Mac and Windows |
 
 ## Thread and state ownership

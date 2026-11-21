@@ -124,7 +124,6 @@ struct App {
     NacreSession *session; /* the running game, whatever the system */
     AudioOut *audio;
     bool rom_bundled;      /* the welcome program: no path, nothing written */
-    std::vector<const NacreCore *> plugins; /* cores loaded from DLLs, after the built-ins */
     /* UTF-8 folders every core is handed (NacreHost points at these buffers). */
     char system_dir[1024], save_dir[1024];
     HWND display;          /* child window over the well that native-video cores draw into */
@@ -378,102 +377,7 @@ void note_recent(const std::wstring &path) {
     save_recents();
 }
 
-/* ---- Plugin cores ------------------------------------------------------ */
-
-/* Cores too big or too different to build in (PS2) ship as DLLs, each in a folder
- * of its own with everything it depends on: cores\<name>\nacre_<name>.dll beside
- * Nacre.exe. NACRE_CORE_DIRS (folders separated by ';') names more folders, which
- * is how a development build finds one. A plugin exports nacre_plugin_core(). */
-typedef const NacreCore *(*PluginEntry)(void);
-
-void plugin_log(const std::wstring &text) { OutputDebugStringW((L"Nacre: " + text + L"\n").c_str()); }
-
-const NacreCore *find_core(const char *id) {
-    const NacreCore *found = nacre_core_by_id(id);
-    for (const NacreCore *c : g.plugins)
-        if (!found && strcmp(c->id, id) == 0) found = c;
-    return found;
-}
-
-void load_plugin(const std::wstring &dll) {
-    /* Its dependencies resolve from its own folder, never from beside Nacre.exe. */
-    HMODULE module = LoadLibraryExW(dll.c_str(), NULL,
-                                    LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
-    if (!module) {
-        plugin_log(L"couldn't load " + dll + L" (Windows error " + std::to_wstring(GetLastError()) + L")");
-        return;
-    }
-    PluginEntry entry = reinterpret_cast<PluginEntry>(GetProcAddress(module, "nacre_plugin_core"));
-    const NacreCore *c = entry ? entry() : NULL;
-    char error[256] = "not a Nacre core";
-    if (!c || !nacre_core_validate(c, error, sizeof(error)) || find_core(c->id)) {
-        if (c && find_core(c->id)) snprintf(error, sizeof(error), "a core named %s is already loaded", c->id);
-        plugin_log(dll + L": " + widen(error));
-        FreeLibrary(module);
-        return;
-    }
-    plugin_log(L"loaded " + widen(c->name) + L" from " + dll);
-    g.plugins.push_back(c); /* stays loaded until the process ends */
-}
-
-void scan_plugin_folder(const std::wstring &folder) {
-    WIN32_FIND_DATAW found;
-    HANDLE search = FindFirstFileW((folder + L"\\nacre_*.dll").c_str(), &found);
-    if (search == INVALID_HANDLE_VALUE) return;
-    do {
-        if (!(found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) load_plugin(folder + L"\\" + found.cFileName);
-    } while (FindNextFileW(search, &found));
-    FindClose(search);
-}
-
-void load_plugins() {
-    wchar_t exe[MAX_PATH];
-    DWORD length = GetModuleFileNameW(NULL, exe, MAX_PATH);
-    std::wstring cores = std::wstring(exe, length);
-    cores = cores.substr(0, cores.find_last_of(L"\\/") + 1) + L"cores";
-    WIN32_FIND_DATAW found;
-    HANDLE search = FindFirstFileW((cores + L"\\*").c_str(), &found);
-    if (search != INVALID_HANDLE_VALUE) {
-        do {
-            if ((found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && found.cFileName[0] != L'.')
-                scan_plugin_folder(cores + L"\\" + found.cFileName);
-        } while (FindNextFileW(search, &found));
-        FindClose(search);
-    }
-    wchar_t extra[4096];
-    DWORD extra_length = GetEnvironmentVariableW(L"NACRE_CORE_DIRS", extra, 4096);
-    if (extra_length == 0 || extra_length >= 4096) return;
-    std::wstring list(extra, extra_length);
-    size_t start = 0;
-    while (start <= list.size()) {
-        size_t end = list.find(L';', start);
-        if (end == std::wstring::npos) end = list.size();
-        if (end > start) scan_plugin_folder(list.substr(start, end - start));
-        start = end + 1;
-    }
-}
-
-/* Built-in cores first, so they win probe ties, then the plugins. */
-std::vector<const NacreCore *> all_cores() {
-    std::vector<const NacreCore *> list;
-    for (const NacreCore *const *entry = nacre_cores(); *entry; entry++) list.push_back(*entry);
-    list.insert(list.end(), g.plugins.begin(), g.plugins.end());
-    return list;
-}
-
-/* The core with the highest probe score above 0, or NULL. */
-const NacreCore *detect_core(const uint8_t *head, size_t head_size, size_t size, const char *path) {
-    const NacreCore *best = NULL;
-    int best_score = 0;
-    for (const NacreCore *c : all_cores()) {
-        int score = c->probe(head, head_size, size, path);
-        if (score > best_score) {
-            best = c;
-            best_score = score;
-        }
-    }
-    return best;
-}
+/* ---- Core folders ---------------------------------------------------- */
 
 /* The per-user folders cores get: system files (BIOS) and their own data. The
  * system folder can be changed from the File menu. */
@@ -1161,15 +1065,15 @@ bool pick_rom_path(std::wstring &out) {
         return spec;
     };
     std::string every;
-    for (const NacreCore *c : all_cores()) {
+    for (const NacreCore *const *c = nacre_cores(); *c; c++) {
         if (!every.empty()) every += ';';
-        every += c->extensions;
+        every += (*c)->extensions;
     }
     names.push_back(L"Games");
     specs.push_back(spec_for(every + ";gbc;rom;bin"));
-    for (const NacreCore *c : all_cores()) {
-        names.push_back(widen(c->name) + L" games");
-        specs.push_back(spec_for(c->extensions));
+    for (const NacreCore *const *c = nacre_cores(); *c; c++) {
+        names.push_back(widen((*c)->name) + L" games");
+        specs.push_back(spec_for((*c)->extensions));
     }
     names.push_back(L"All files");
     specs.push_back(L"*.*");
@@ -1427,7 +1331,7 @@ void load_file(const std::wstring &path) {
         return;
     }
     std::string utf8 = narrow(path);
-    const NacreCore *found = detect_core(head.data(), head.size(), (size_t)total, utf8.c_str());
+    const NacreCore *found = nacre_core_detect(head.data(), head.size(), (size_t)total, utf8.c_str());
     if (!found) {
         show_alert(L"Nacre doesn't recognize that file as a game for any system it runs. Your current "
                    L"session has been kept.");
@@ -1569,15 +1473,27 @@ void toggle_fullscreen() {
     SetFocus(g.hwnd);
 }
 
+#ifdef NACRE_HAVE_PS2
+#define ABOUT_TEXT                                                                         \
+    L"A small machine for CHIP-8, Game Boy and PS2 games.\nMade by tdotlab.\n\n"           \
+    L"Free software under the GNU GPL, version 3 or later (see LICENSE).\n"               \
+    L"The PS2 core is derived from PCSX2 (pcsx2.net) by the PCSX2 Dev Team, GPL 3 or "     \
+    L"later; its libraries are listed in PS2_THIRD_PARTY_LICENSES.html.\n"                \
+    L"Sound uses SDL3, bundled under its zlib license (see THIRD_PARTY_NOTICES.txt)."
+#else
+#define ABOUT_TEXT                                                                         \
+    L"A small machine for CHIP-8 and Game Boy games.\nMade by tdotlab.\n\n"                \
+    L"Free software under the GNU GPL, version 3 or later (see LICENSE).\n"               \
+    L"Sound uses SDL3, bundled under its zlib license (see THIRD_PARTY_NOTICES.txt)."
+#endif
+
 void show_about() {
     bool was_open = g.dialog_open;
     g.dialog_open = true;
     release_keys();
     pump_audio();
     TaskDialog(g.hwnd, NULL, L"About Nacre", L"Nacre " NACRE_VERSION_W,
-               L"A small machine for CHIP-8, Game Boy and, with its plugin, PS2 games.\nMade by tdotlab.\n\nFree software under the GNU GPL, "
-               L"version 3 or later (see LICENSE).\nSound uses SDL3, bundled under its zlib license "
-               L"(see THIRD_PARTY_NOTICES.txt).",
+               ABOUT_TEXT,
                TDCBF_OK_BUTTON, TD_INFORMATION_ICON, NULL);
     g.dialog_open = was_open;
     g.previous = SDL_GetTicksNS();
@@ -2504,14 +2420,13 @@ bool initialize(int show) {
     if (!g.ephemeral) g.slot = (int)std::min<DWORD>(reg_dword(L"gbSlot", 0), (DWORD)(STATE_SLOTS - 1));
     if (!g.ephemeral) load_recents();
 
-    /* Plugin cores, and the folders every core gets. */
-    load_plugins();
+    /* The folders every core gets. */
     std::wstring system_dir = g.ephemeral ? std::wstring() : reg_string(L"systemDir");
     if (system_dir.empty()) system_dir = app_data_folder(L"System");
     set_folder(g.system_dir, system_dir);
     set_folder(g.save_dir, app_data_folder(L"Data"));
-    for (const NacreCore *c : g.plugins)
-        if ((c->flags & NACRE_CORE_NEEDS_SYSTEM_FILES) && !system_dir.empty())
+    for (const NacreCore *const *c = nacre_cores(); *c; c++)
+        if (((*c)->flags & NACRE_CORE_NEEDS_SYSTEM_FILES) && !system_dir.empty())
             SHCreateDirectoryExW(NULL, system_dir.c_str(), NULL); /* somewhere obvious to put a BIOS */
 
     /* The session runs whichever core a file picks; a snapshot run never writes. */

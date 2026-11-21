@@ -5,8 +5,31 @@ if(APPLE)
 elseif(WIN32)
     enable_language(CXX)
     enable_language(RC)
-    # Link the C runtime statically so Nacre.exe runs without a redistributable.
-    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
+# The PS2 core (src/ps2, derived from PCSX2) is Windows-only for now and needs the
+# dependency bundle tools/ps2-deps/build-dependencies.bat builds. It is on when the
+# bundle is there.
+set(NACRE_PS2_DEPS "${CMAKE_CURRENT_SOURCE_DIR}/deps/ps2" CACHE PATH
+    "PS2 dependency bundle (from tools/ps2-deps/build-dependencies.bat)")
+set(_ps2_default OFF)
+if(WIN32 AND EXISTS "${NACRE_PS2_DEPS}/lib/cmake")
+    set(_ps2_default ON)
+endif()
+option(NACRE_PS2 "Build the PS2 core" ${_ps2_default})
+if(NACRE_PS2 AND NOT WIN32)
+    message(FATAL_ERROR "The PS2 core builds on Windows only so far")
+endif()
+
+if(WIN32)
+    if(NACRE_PS2)
+        # The PS2 core's libraries are DLLs on the shared C runtime, so Nacre.exe uses
+        # it too and needs the Visual C++ runtime installed.
+        set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+    else()
+        # Link the C runtime statically so Nacre.exe runs without a redistributable.
+        set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    endif()
 endif()
 
 include(FetchContent)
@@ -47,6 +70,11 @@ target_include_directories(nacre_core PUBLIC include)
 target_compile_features(nacre_core PUBLIC c_std_99)
 if(UNIX)
     target_link_libraries(nacre_core PUBLIC m)
+endif()
+if(NACRE_PS2)
+    add_subdirectory(src/ps2)
+    target_compile_definitions(nacre_core PUBLIC NACRE_HAVE_PS2)
+    target_link_libraries(nacre_core PUBLIC nacre_ps2)
 endif()
 
 if(APPLE)
@@ -128,6 +156,21 @@ elseif(WIN32)
                 "$<TARGET_FILE_DIR:nacre-desktop>/LICENSE"
         VERBATIM
     )
+    if(NACRE_PS2)
+        # The PS2 core's DLLs, its Direct3D 12 Agility runtime and its resources.
+        add_custom_command(TARGET nacre-desktop POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${NACRE_PS2_DLLS}
+                    "$<TARGET_FILE_DIR:nacre-desktop>"
+            COMMAND ${CMAKE_COMMAND} -E copy_directory "${NACRE_PS2_DEPS}/bin/D3D12"
+                    "$<TARGET_FILE_DIR:nacre-desktop>/D3D12"
+            COMMAND ${CMAKE_COMMAND} -E copy_directory "${NACRE_PS2_RESOURCES}"
+                    "$<TARGET_FILE_DIR:nacre-desktop>/resources"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${CMAKE_CURRENT_SOURCE_DIR}/assets/ps2/ThirdPartyLicenses.html"
+                    "$<TARGET_FILE_DIR:nacre-desktop>/PS2_THIRD_PARTY_LICENSES.html"
+            VERBATIM
+        )
+    endif()
 else()
     add_custom_command(TARGET nacre-desktop POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory
@@ -151,4 +194,13 @@ if(MSVC)
 else()
     target_compile_options(nacre_core PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(nacre-desktop PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+if(NACRE_PS2)
+    # Boots a disc through the registered PS2 core in a plain window (see the file).
+    # It sits beside Nacre.exe and uses the DLLs and resources copied there.
+    add_executable(nacre-ps2-smoke EXCLUDE_FROM_ALL tests/test_ps2_smoke.cpp)
+    set_target_properties(nacre-ps2-smoke PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+    target_link_libraries(nacre-ps2-smoke PRIVATE nacre_core user32 gdi32)
+    add_dependencies(nacre-ps2-smoke nacre-desktop)
 endif()

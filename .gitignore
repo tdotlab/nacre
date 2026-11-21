@@ -14,3 +14,4 @@ tests/test_demo
 /tests/test_gb_input
 /tests/test_nacre_core
 /tests/test_nacre_session
+/deps/

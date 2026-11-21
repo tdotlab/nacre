@@ -165,8 +165,9 @@ XO-CHIP, rewind, and web builds each deserve a separate scope decision.
 
 ## PS2
 
-A PS2 core built on PCSX2 is in progress. docs/PS2.md has the interface mapping,
-the build plan, how upstream is tracked, and the current status.
+A PS2 core derived from PCSX2 is built in on Windows. docs/PS2.md has the
+interface mapping, the layout and build, how upstream fixes are ported, and the
+current status.
 
 ## Suggested implementation settings
 

@@ -9,6 +9,9 @@
 static const NacreCore *const CORES[] = {
     &nacre_gb_core,
     &nacre_chip8_core,
+#ifdef NACRE_HAVE_PS2
+    &nacre_ps2_core,
+#endif
     NULL,
 };
 
