@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 typedef struct {
     NacreHost host;
@@ -135,8 +136,55 @@ static void set_pointer(void *self, unsigned port, int x, int y, int pressed) {
         nds_set_touch(core->nds, -1, -1, 0);
 }
 
+/* Days from 1970-01-01 to a proleptic Gregorian date. */
+static int64_t days_from_civil(int64_t y, int m, int d) {
+    int64_t era, yoe, doy;
+    y -= m <= 2;
+    era = (y >= 0 ? y : y - 399) / 400;
+    yoe = y - era * 400;
+    doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    return era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468;
+}
+
+/* The DS clock keeps local time, so the host's UTC seconds are shifted by
+ * the local offset in effect at that moment. */
 static void set_wall_clock(void *self, int64_t unix_seconds) {
-    nds_set_wall_clock(((NdsCore *)self)->nds, unix_seconds);
+    time_t t = (time_t)unix_seconds;
+    struct tm *local = localtime(&t);
+    int64_t seconds = unix_seconds;
+    if (local)
+        seconds = days_from_civil(local->tm_year + 1900, local->tm_mon + 1, local->tm_mday) * 86400 +
+                  local->tm_hour * 3600 + local->tm_min * 60 + local->tm_sec;
+    nds_set_wall_clock(((NdsCore *)self)->nds, seconds);
+}
+
+static size_t save_size(void *self) {
+    NdsCore *core = (NdsCore *)self;
+    return core->loaded ? nds_save_size(core->nds) : 0;
+}
+
+static size_t save_write(void *self, uint8_t *out, size_t capacity) {
+    return nds_save_write(((NdsCore *)self)->nds, out, capacity);
+}
+
+static int save_load(void *self, const uint8_t *data, size_t size) {
+    return nds_save_load(((NdsCore *)self)->nds, data, size);
+}
+
+static int save_dirty(void *self) { return nds_save_dirty(((NdsCore *)self)->nds); }
+
+static void save_mark_clean(void *self) { nds_save_mark_clean(((NdsCore *)self)->nds); }
+
+/* save_type: auto, none, eeprom512, eeprom8k, eeprom64k, eeprom128k,
+ * fram32k, flash256k, flash512k or flash1m. */
+static int set_option(void *self, const char *key, const char *value) {
+    NdsCore *core = (NdsCore *)self;
+    NdsSaveType type;
+    if (!key || strcmp(key, "save_type")) return 0;
+    type = nds_save_type_from_name(value);
+    if (type == NDS_SAVE_TYPE_COUNT) return 0;
+    nds_set_save_type(core->nds, type);
+    return 1;
 }
 
 static const char *title(void *self) {
@@ -150,7 +198,7 @@ const NacreCore nacre_nds_core = {
     .id = "nds",
     .name = "Nintendo DS",
     .extensions = "nds",
-    .flags = NACRE_CORE_HAS_POINTER,
+    .flags = NACRE_CORE_HAS_POINTER | NACRE_CORE_HAS_BATTERY | NACRE_CORE_SAVE_SIZED_LATER,
     .pad_labels = {
         [NACRE_PAD_UP] = "Up",
         [NACRE_PAD_DOWN] = "Down",
@@ -180,6 +228,12 @@ const NacreCore nacre_nds_core = {
     .audio_clear = audio_clear,
     .set_pad = set_pad,
     .set_pointer = set_pointer,
+    .save_size = save_size,
+    .save_write = save_write,
+    .save_load = save_load,
+    .save_dirty = save_dirty,
+    .save_mark_clean = save_mark_clean,
     .set_wall_clock = set_wall_clock,
+    .set_option = set_option,
     .title = title,
 };

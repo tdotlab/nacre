@@ -1,10 +1,10 @@
 # Nintendo DS core
 
-Status: M1 (CPUs, memory, BIOS, direct boot, test-ROM validation) and M2
-(timers, DMA, SPI, RTC, cart reads) done; M3 (2D) next. Both ARM CPUs run a
-cartridge from direct boot through our own BIOS, and display modes 0-3 show.
-Commercial games now get further; two of the three tried wait on backup
-memory (M5). See M2 below. armwrestler
+Status: M1 (CPUs, memory, BIOS, direct boot, test-ROM validation), M2
+(timers, DMA, SPI, RTC, cart reads) and the backup save chips (pulled forward
+from M5) done; M3 (2D) next. Both ARM CPUs run a cartridge from direct boot
+through our own BIOS, and display modes 0-3 show. The three commercial games
+tried all reach their main loops, with blank screens until M3. armwrestler
 passes all nine of its pages and rockwrestler all 23 of its tests, checked by
 frame hash in `make test`. Audio is still silent. The core runs at 74-80% of
 real time on the i5-8400 (see Risks). This file is the plan until the core exists, then it becomes the core's
@@ -27,7 +27,8 @@ PS2 builds on Windows only.
 | `src/nds/nds_arm.c` | One ARM/Thumb interpreter for both CPUs: ARMv5TE for the ARM946E-S, ARMv4T for the ARM7TDMI |
 | `src/nds/nds_cp15.c` | ARM9 coprocessor: protection unit, ITCM/DTCM placement, cache control (caches are not modelled) |
 | `src/nds/nds_bios.c` | Our own BIOS: the SWI calls games use, implemented from the docs, plus direct boot |
-| `src/nds/nds_cart.c` | Header, chip ID, ROM commands in data mode and cart DMA; backup chips (EEPROM, flash, FRAM) in M5 |
+| `src/nds/nds_cart.c` | Header, chip ID, ROM commands in data mode and cart DMA, the AUXSPI port |
+| `src/nds/nds_backup.c` | The backup save chip behind AUXSPI: EEPROM, FLASH, FRAM, type detection |
 | `src/nds/nds_spi.c` | Firmware (generated user settings), touchscreen controller, power management |
 | `src/nds/nds_rtc.c` | Real-time clock |
 | `src/nds/nds_gpu2d.c` | Both 2D engines, master brightness, display capture |
@@ -56,7 +57,10 @@ learned, in behavior terms. That keeps "our own code" true and checkable.
 
 Sources used so far: GBATEK (CPU, CP15, memory maps, I/O, BIOS functions, boot
 state and BIOS RAM usage, timers, DMA, cartridge protocol and chip IDs, SPI,
-firmware, touchscreen, power management, RTC). The rockwrestler ROM (prebuilt, run only) and armwrestler (assembled
+firmware, touchscreen, power management, RTC, "DS Cartridge Backup" and the
+FLASH commands under "DS Firmware Serial Flash Memory"). The save-chip quirks
+for Assassin's Creed II: Discovery come from tracing that game's own AUXSPI
+traffic. The rockwrestler ROM (prebuilt, run only) and armwrestler (assembled
 from its public source with the GNU Arm toolchain, run only) are test inputs,
 not references. Their source was read only to learn how to drive them (which
 button opens which page) and what a failing test number checks.
@@ -113,7 +117,7 @@ an existing save while its size is still 0; the flag keeps the Game Boy, whose
 size is known, from getting a stray load for carts without a battery. Writes
 already query the size at write time. Saves up to 1 MiB fit
 `NACRE_MAX_SAVE_BYTES`; carts with large NAND storage are out of scope. The DS
-table sets neither flag until M5.
+table sets both.
 
 **Per-system look.** Add `{"nds", false, "59.8 HZ FRAMES"}` to the Windows and
 Mac look tables. Pad labels: A EAST, B SOUTH, X NORTH, Y WEST, L L1, R R1,
@@ -197,8 +201,9 @@ harness grows with each milestone, as `test_gb` did.
      the BIOS RAM block at 27FF800h/27FFC00h the way the firmware does.
    - RTC (`nds_rtc.c`): the bit-banged S-35180, with LSB-first and MSB-first
      commands, date/time, status and alarm registers, and leap years to 2099.
-     `nds_set_wall_clock` takes Unix seconds and the session passes UTC, so the
-     DS shows UTC until the frontends pass local time (M5).
+     `nds_set_wall_clock` takes seconds since 1970 in the DS's own (local)
+     time; the session passes UTC, and `nds_core.c` shifts it to the host's
+     local time.
    - Checked by `tests/test_nds.c` at register level (timer, DMA, cart, SPI
      and RTC checks against GBATEK's numbers) rather than the libnds examples
      the plan named: their console text needs M3's tile engine.
@@ -209,8 +214,37 @@ harness grows with each milestone, as `test_gb` did.
      (Altair's Chronicles) runs its ARM9 with the display set up and has not
      touched its backup chip yet; what it waits on is still open. Assassin's
      Creed II: Discovery (DSi-enhanced) reads its save chip, gets nothing, and
-     stops in its fatal-error loop. Backup memory (M5) blocks two of the
-     three; after that, 2D.
+     stops in its fatal-error loop. Backup memory (M5) blocked two of the
+     three, so the chips came next.
+   - **Backup chips, pulled forward from M5. Done.** `nds_backup.c` sits
+     behind AUXSPICNT/AUXSPIDATA in backup mode: 0.5, 8, 64 and 128 KiB
+     EEPROM, 32 KiB FRAM, and 256 KiB, 512 KiB and 1 MiB FLASH, with WREN/WRDI,
+     RDSR/WRSR, reads (FLASH FAST READ with its dummy byte), page-wrapped
+     writes, page and sector erase, and RDID. Writes complete at once.
+   - The type comes from the `save_type` option, else an existing save's size,
+     else detection by GBATEK's hint: the bytes sent from the first routine
+     after chip select are the command and address. One address byte is 0.5
+     KiB EEPROM, two are 8 KiB, three are FLASH, and RDID first means FLASH.
+     A chip grows to 64 KiB, 512 KiB or 1 MiB when the game addresses past its
+     end, even one sized by a file; only the override pins it. A file turns
+     detection off. Rune Factory (ARF) is fixed at 64 KiB, per GBATEK.
+   - Two rules came from Assassin's Creed II: Discovery. Its ARM7 sends a
+     write's command, address and data from one routine, so only reads
+     re-measure a known chip; writes are measured only while the type is
+     unknown. It also writes a block across a 32-byte page and reads it back,
+     terminating if they differ: a write that runs past an 8 KiB EEPROM's page
+     means 128-byte pages, so the chip becomes 64 KiB.
+   - The DS table sets `HAS_BATTERY` and `SAVE_SIZED_LATER`, so the session
+     loads an existing `.sav` and writes the detected size. The RTC now gets
+     local time.
+   - Checked in `test_nds.c` at register level (detection, growth, the page
+     rules, WEL, erase, FAST READ, file sizing, the override, survival across
+     reset) and through the core table in `test_nacre_core.c`.
+   - Smoke test, 20 headless seconds: Mario Kart DS detects 256 KiB FLASH and
+     sets up a mode 0 screen with BG1-3 and sprites; Assassin's Creed II:
+     Discovery detects 64 KiB EEPROM, passes its save check and steps through
+     VRAM-display screens; Altair's Chronicles hasn't used its chip yet. All
+     three idle in VBlank-driven main loops, so 2D is what they need now.
 4. **M3, 2D.**
    - Both engines: every BG mode including extended rotation and bitmaps,
      sprites, windows, blending, extended palettes, mosaic, master brightness
@@ -224,9 +258,11 @@ harness grows with each milestone, as `test_gb` did.
    - Done when the maxmod examples and game music play. A listening check is
      still a separate step.
 6. **M5, saves.**
-   - EEPROM, flash and FRAM, with type from file size or detection, a
-     `save_type` override option, and the RTC from wall-clock time.
-   - Done when a save round-trips headlessly and survives an app relaunch.
+   - The chips, the `save_type` option and local wall-clock time are done
+     (see the backup chips under M2). Left: a frontend way to set `save_type`,
+     and a small table of games whose detection goes wrong, built from testing.
+   - Done when a game's save round-trips headlessly and survives an app
+     relaunch.
 7. **M6, 3D.** This is the big one, in three parts:
    - Geometry: the command FIFO and GXFIFO DMA, matrix stacks, lighting,
      clipping, culling and the polygon and vertex limits.
@@ -261,6 +297,11 @@ practical.
 **Timing-sensitive games.** Caches and exact bus timing are not modelled. A few
 games will need fixes once they are found.
 
-**Save detection.** A wrong chip type means a lost save. Detect from the file
-when one exists, and fall back to an override option. Build our own small game
-table from testing, never copied from another emulator.
+**Save detection.** A wrong chip type means a lost save. The file decides when
+one exists and the `save_type` override beats both; detection only guesses for
+a fresh game. Its known gaps: a game whose first access is a write sent from one
+routine, and 64 KiB EEPROM games that only use their first 8 KiB in short
+writes (harmless: the file is written at 8 KiB, and a chip sized by a file
+still grows when the game goes further; only the override pins the size).
+Build our own small game table from testing, never copied from another
+emulator.

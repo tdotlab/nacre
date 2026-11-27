@@ -8,7 +8,10 @@
 
 Nds *nds_create(void) {
     Nds *nds = (Nds *)calloc(1, sizeof(Nds));
-    if (nds) nds_reset(nds);
+    if (nds) {
+        nds_backup_insert(nds);
+        nds_reset(nds);
+    }
     return nds;
 }
 
@@ -34,6 +37,7 @@ int nds_load_rom(Nds *nds, const uint8_t *rom, size_t length, char *error, size_
     nds->header = header;
     nds_banner_title(rom, length, &header, nds->title, sizeof nds->title);
     if (!nds->title[0]) snprintf(nds->title, sizeof nds->title, "%s", header.title);
+    nds_backup_insert(nds);
     nds_reset(nds);
     return 1;
 }

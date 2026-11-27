@@ -180,8 +180,9 @@ pass by frame hash in `make test`, and `test_nds --run` scripts input and
 benchmarks. The core runs at 74-80% of real time on the i5-8400, so the
 interpreter speed pass may move ahead of M7. M2 is done: timers, DMA, SPI
 (firmware, touch, power), the RTC and cart reads, checked at register level.
-Two of three commercial games tried now get further and wait on backup memory, so the
-save chips may move ahead of M3 (2D), which is next on the plan.
+The backup save chips (EEPROM, FLASH, FRAM, with type detection) moved
+ahead of M3 from M5, because two of three commercial games blocked on them;
+all three now reach their main loops with blank screens. M3 (2D) is next.
 
 ## Suggested implementation settings
 

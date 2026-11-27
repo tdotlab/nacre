@@ -176,6 +176,8 @@ uint32_t nds_cart_chip_id(const Nds *nds) {
 void nds_cart_reset(Nds *nds) {
     memset(&nds->cart, 0, sizeof nds->cart);
     nds->cart.auxspidata = 0xFF;
+    nds_backup_deselect(nds);
+    nds->backup.status &= (uint8_t)~2; /* WEL clears at power-up */
 }
 
 static uint8_t rom_byte(const Nds *nds, uint32_t a) {
@@ -272,9 +274,16 @@ void nds_cart_write(Nds *nds, int cpu, uint32_t off, uint32_t v, uint32_t mask) 
     if (cpu != nds_cart_owner(nds)) return;
     switch (off) {
     case 0x1A0:
-        c->auxspicnt = (uint16_t)((c->auxspicnt & ~(mask & 0xE043u)) | (v & mask & 0xE043u));
-        /* The backup chip arrives with M5; until then nothing answers. */
-        if (mask & 0x00FF0000u) c->auxspidata = 0xFF;
+        if (mask & 0xFFFFu) {
+            c->auxspicnt = (uint16_t)((c->auxspicnt & ~(mask & 0xE043u)) | (v & mask & 0xE043u));
+            if ((c->auxspicnt & 0xA000u) != 0xA000u) nds_backup_deselect(nds);
+        }
+        /* A byte to the backup chip, which answers at once (bit 13 selects
+         * SPI, bit 15 enables the slot). */
+        if (mask & 0x00FF0000u)
+            c->auxspidata = (c->auxspicnt & 0xA000u) == 0xA000u
+                                ? nds_backup_transfer(nds, cpu, (uint8_t)(v >> 16), !(c->auxspicnt & 0x40))
+                                : 0xFF;
         break;
     case 0x1A4: {
         /* Busy and DRQ are status, bit 15 is a write-only strobe, and RESB

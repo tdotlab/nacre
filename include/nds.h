@@ -71,6 +71,38 @@ void nds_set_touch(Nds *nds, int x, int y, int pressed);
  * clock starts at 2000-01-01 00:00. */
 void nds_set_wall_clock(Nds *nds, int64_t unix_seconds);
 
+/* The cartridge's backup chip. AUTO detects it from the save file's size or
+ * from how the game uses it; any other type is the save_type override. */
+typedef enum {
+    NDS_SAVE_AUTO,
+    NDS_SAVE_NONE,
+    NDS_SAVE_EEPROM_512,
+    NDS_SAVE_EEPROM_8K,
+    NDS_SAVE_EEPROM_64K,
+    NDS_SAVE_EEPROM_128K,
+    NDS_SAVE_FRAM_32K,
+    NDS_SAVE_FLASH_256K,
+    NDS_SAVE_FLASH_512K,
+    NDS_SAVE_FLASH_1M,
+    NDS_SAVE_TYPE_COUNT
+} NdsSaveType;
+
+/* Names as the save_type option spells them ("auto", "eeprom8k", "flash512k"...);
+ * from_name returns NDS_SAVE_TYPE_COUNT for an unknown name. */
+const char *nds_save_type_name(NdsSaveType type);
+NdsSaveType nds_save_type_from_name(const char *name);
+void nds_set_save_type(Nds *nds, NdsSaveType type);
+/* The chip in use; AUTO until detection settles. */
+NdsSaveType nds_save_type(const Nds *nds);
+/* 0 until the type is known. */
+size_t nds_save_size(const Nds *nds);
+size_t nds_save_write(const Nds *nds, uint8_t *out, size_t capacity);
+/* Takes a save file; its size picks the chip unless the override is set.
+ * Returns 0 for a size no chip has. Call after nds_load_rom. */
+int nds_save_load(Nds *nds, const uint8_t *data, size_t size);
+int nds_save_dirty(const Nds *nds);
+void nds_save_mark_clean(Nds *nds);
+
 /* Interleaved stereo int16 at NDS_AUDIO_SAMPLE_RATE. Returns frames copied. The
  * internal buffer holds about a third of a second; older samples are dropped. */
 size_t nds_audio_read(Nds *nds, int16_t *stereo, size_t max_frames);

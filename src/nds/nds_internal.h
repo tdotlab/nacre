@@ -163,6 +163,23 @@ typedef struct {
     int64_t offset;         /* added by the game setting the clock */
 } NdsRtc;
 
+/* The backup chip on the AUXSPI bus (nds_backup.c). */
+#define NDS_BACKUP_MAX 0x100000u
+typedef struct {
+    uint8_t data[NDS_BACKUP_MAX];
+    NdsSaveType type, override;
+    int fixed;              /* type from the override or a file: no detection */
+    int from_file;
+    int dirty;
+    /* The transfer under way. */
+    int selected;
+    uint8_t command, status;
+    uint32_t step, address, seen; /* seen: address bytes so far */
+    uint32_t pc;            /* instruction that sent the measured run */
+    int in_data, dummy, measuring;
+    int wrapped;            /* the last byte written ended a page */
+} NdsBackup;
+
 struct Nds {
     uint8_t *rom;
     size_t rom_size;
@@ -227,6 +244,7 @@ struct Nds {
     NdsCart cart;
     NdsSpi spi;
     NdsRtc rtc;
+    NdsBackup backup;
     uint8_t firmware[NDS_FIRMWARE_SIZE];
 
     uint32_t framebuffer[NDS_FRAME_WIDTH * NDS_FRAME_HEIGHT];
@@ -255,6 +273,11 @@ void nds_cart_write(Nds *nds, int cpu, uint32_t off, uint32_t value, uint32_t ma
 uint32_t nds_cart_read_data(Nds *nds, int cpu);
 /* Runs the cart's `ready` event once emulated time reaches it. */
 void nds_cart_update(Nds *nds, uint64_t now);
+
+/* nds_backup.c */
+void nds_backup_insert(Nds *nds);
+uint8_t nds_backup_transfer(Nds *nds, int cpu, uint8_t byte, int last);
+void nds_backup_deselect(Nds *nds);
 
 /* nds_timer.c */
 void nds_timer_reset(Nds *nds);

@@ -320,6 +320,19 @@ static void nds_checks(void) {
     core->set_pointer(self, 0, -1, -1, 0);
     CHECK(run_ms(core, self, 20));
     core->set_pad(self, 0, 0);
+
+    /* Backup memory: sized by a save file, or by the save_type option. */
+    {
+        static uint8_t save[0x10000], out[0x10000];
+        CHECK((core->flags & NACRE_CORE_HAS_BATTERY) && (core->flags & NACRE_CORE_SAVE_SIZED_LATER));
+        CHECK(core->save_size(self) == 0 && !core->save_dirty(self));
+        save[0x1234] = 0x5A;
+        CHECK(core->save_load(self, save, sizeof save) && core->save_size(self) == sizeof save);
+        CHECK(core->save_write(self, out, sizeof out) == sizeof out && out[0x1234] == 0x5A);
+        CHECK(!core->save_load(self, save, 1234));
+        CHECK(core->set_option(self, "save_type", "flash512k") && core->save_size(self) == 0x80000);
+        CHECK(!core->set_option(self, "save_type", "floppy") && !core->set_option(self, "region", "eu"));
+    }
     core->destroy(self);
 }
 

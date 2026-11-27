@@ -25,7 +25,7 @@ $(TARGET): $(SOURCES) include/chip8.h include/audio.h include/scheduler.h
 
 GB_SOURCES = src/gb/gb.c src/gb/gb_cpu.c src/gb/gb_ppu.c src/gb/gb_apu.c src/gb/gb_cart.c src/gb/gb_state.c
 GB_HEADERS = include/gb.h src/gb/gb_internal.h
-NDS_SOURCES = src/nds/nds.c src/nds/nds_cart.c src/nds/nds_arm.c src/nds/nds_cp15.c src/nds/nds_mem.c src/nds/nds_io.c src/nds/nds_bios.c src/nds/nds_gpu2d.c src/nds/nds_timer.c src/nds/nds_dma.c src/nds/nds_spi.c src/nds/nds_rtc.c
+NDS_SOURCES = src/nds/nds.c src/nds/nds_cart.c src/nds/nds_arm.c src/nds/nds_cp15.c src/nds/nds_mem.c src/nds/nds_io.c src/nds/nds_bios.c src/nds/nds_gpu2d.c src/nds/nds_timer.c src/nds/nds_dma.c src/nds/nds_spi.c src/nds/nds_rtc.c src/nds/nds_backup.c
 NDS_HEADERS = include/nds.h src/nds/nds_internal.h src/nds/nds_arm.h
 CORE_SOURCES = src/core/session.c src/core/registry.c src/core/chip8_core.c src/core/gb_core.c src/core/nds_core.c src/chip8.c src/scheduler.c src/audio.c $(GB_SOURCES) $(NDS_SOURCES)
 CORE_HEADERS = include/nacre_core.h include/nacre_session.h include/chip8.h include/scheduler.h include/audio.h $(GB_HEADERS) $(NDS_HEADERS)

@@ -601,6 +601,189 @@ static void rtc_checks(void) {
     nds_destroy(nds);
 }
 
+/* ---- backup chip ---------------------------------------------------------- */
+
+/* One AUXSPI byte from the ARM9, as if sent by the instruction at `pc`; the
+ * chip measures address widths by which routine sends the bytes. */
+static uint8_t aux(Nds *nds, uint32_t pc, uint8_t byte, int last) {
+    nds->arm9.r[15] = pc + 8;
+    nds9_write16(nds, 0x040001A0u, last ? 0xA000 : 0xA040);
+    nds9_write8(nds, 0x040001A2u, byte);
+    return nds9_read8(nds, 0x040001A2u);
+}
+
+enum { CMD_PC = 0x02001000, DATA_PC = 0x02002000 };
+
+/* The SDK's shape: command and address from one routine, data from another. */
+static void aux_cmd(Nds *nds, uint8_t cmd, uint32_t address, int width, int ends) {
+    aux(nds, CMD_PC, cmd, ends && width == 0);
+    for (int i = width - 1; i >= 0; i--) aux(nds, CMD_PC, (uint8_t)(address >> (8 * i)), ends && i == 0);
+}
+
+static void aux_write(Nds *nds, uint8_t cmd, uint32_t address, int width, const uint8_t *data, int n) {
+    aux_cmd(nds, 0x06, 0, 0, 1); /* WREN */
+    aux_cmd(nds, cmd, address, width, 0);
+    for (int i = 0; i < n; i++) aux(nds, DATA_PC, data[i], i == n - 1);
+}
+
+static int aux_read_matches(Nds *nds, uint8_t cmd, uint32_t address, int width, const uint8_t *data, int n) {
+    int same = 1;
+    aux_cmd(nds, cmd, address, width, 0);
+    for (int i = 0; i < n; i++)
+        if (aux(nds, DATA_PC, 0, i == n - 1) != data[i]) same = 0;
+    return same;
+}
+
+static uint8_t aux_status(Nds *nds) {
+    aux(nds, CMD_PC, 0x05, 0);
+    return aux(nds, DATA_PC, 0, 1);
+}
+
+static void backup_checks(void) {
+    static uint8_t file[0x80000];
+    static const uint8_t hello[4] = {0x12, 0x34, 0x56, 0x78};
+    static const uint8_t ab[1] = {0xAB}, five_a[1] = {0x5A}, erased[2] = {0xFF, 0xFF};
+    uint8_t out[0x2000], page[34];
+    Nds *nds;
+    nds_test_make_rom(rom, NULL);
+
+    /* A blank chip of unknown type: no save yet, a ready status. */
+    nds = idle_machine(rom, sizeof rom);
+    CHECK(nds_save_type(nds) == NDS_SAVE_AUTO && nds_save_size(nds) == 0 && !nds_save_dirty(nds));
+    CHECK(aux_status(nds) == 0x00);
+    /* Two address bytes make an 8 KiB EEPROM; data reads back, and the
+     * write enable latch clears after the write. */
+    aux_write(nds, 0x02, 0x0100, 2, hello, 4);
+    CHECK(nds_save_type(nds) == NDS_SAVE_EEPROM_8K && nds_save_size(nds) == 0x2000 && nds_save_dirty(nds));
+    CHECK(aux_read_matches(nds, 0x03, 0x0100, 2, hello, 4));
+    CHECK(aux_status(nds) == 0x00);
+    /* Without WREN a write does nothing. */
+    aux_cmd(nds, 0x02, 0x0100, 2, 0);
+    aux(nds, DATA_PC, 0xEE, 1);
+    CHECK(aux_read_matches(nds, 0x03, 0x0100, 2, hello, 1));
+    CHECK(nds_save_write(nds, out, sizeof out) == 0x2000 && out[0x101] == 0x34 && out[0] == 0xFF);
+    nds_save_mark_clean(nds);
+    CHECK(!nds_save_dirty(nds));
+    /* Filling one whole 32-byte page is fine for an 8 KiB chip. */
+    for (int i = 0; i < 34; i++) page[i] = (uint8_t)(0x80 + i);
+    aux_write(nds, 0x02, 0x0400, 2, page, 32);
+    CHECK(nds_save_type(nds) == NDS_SAVE_EEPROM_8K && aux_read_matches(nds, 0x03, 0x0400, 2, page, 32));
+    /* Going past 8 KiB grows it to 64 KiB, keeping the data. */
+    aux_write(nds, 0x02, 0x9000, 2, hello, 2);
+    CHECK(nds_save_type(nds) == NDS_SAVE_EEPROM_64K && nds_save_size(nds) == 0x10000);
+    CHECK(aux_read_matches(nds, 0x03, 0x0100, 2, hello, 4) && aux_read_matches(nds, 0x03, 0x9000, 2, hello, 2));
+    /* One address byte on a later read: it is really the 0.5 KiB chip
+     * (GBATEK's Over the Hedge case), whose 0Ah/0Bh reach the upper half. */
+    (void)aux_read_matches(nds, 0x0B, 0x10, 1, hello, 1);
+    CHECK(nds_save_type(nds) == NDS_SAVE_EEPROM_512 && nds_save_size(nds) == 0x200);
+    aux_write(nds, 0x0A, 0x10, 1, hello, 2);
+    CHECK(aux_read_matches(nds, 0x0B, 0x10, 1, hello, 2));
+    CHECK(aux_status(nds) == 0xF0);
+    nds_destroy(nds);
+
+    /* Writing on past a 32-byte page shows 128-byte pages: 64 KiB. (Assassin's
+     * Creed II: Discovery writes a long block, reads it back, and stops the
+     * machine if they differ.) */
+    nds = idle_machine(rom, sizeof rom);
+    aux_write(nds, 0x02, 0x0410, 2, page, 34);
+    CHECK(nds_save_type(nds) == NDS_SAVE_EEPROM_64K && aux_read_matches(nds, 0x03, 0x0410, 2, page, 34));
+    nds_destroy(nds);
+    /* A chip known to be 8 KiB wraps inside the page. */
+    nds = idle_machine(rom, sizeof rom);
+    nds_set_save_type(nds, NDS_SAVE_EEPROM_8K);
+    aux_write(nds, 0x02, 0x0400, 2, page, 34);
+    CHECK(aux_read_matches(nds, 0x03, 0x0400, 2, page + 32, 2) && aux_read_matches(nds, 0x03, 0x0402, 2, page + 2, 30));
+    nds_destroy(nds);
+
+    /* Assassin's Creed II: Discovery's pattern: reads give the width, then a
+     * write sends command, address and data from one routine, running across a
+     * 32-byte page. The data lands where it was sent, on a 64 KiB chip. */
+    nds = idle_machine(rom, sizeof rom);
+    (void)aux_read_matches(nds, 0x03, 0x0000, 2, hello, 1);
+    CHECK(nds_save_type(nds) == NDS_SAVE_EEPROM_8K);
+    aux_cmd(nds, 0x06, 0, 0, 1);
+    aux(nds, CMD_PC, 0x02, 0);
+    aux(nds, CMD_PC, 0x00, 0);
+    aux(nds, CMD_PC, 0x24, 0);
+    for (int i = 0; i < 30; i++) aux(nds, CMD_PC, page[i], i == 29);
+    CHECK(nds_save_type(nds) == NDS_SAVE_EEPROM_64K && aux_read_matches(nds, 0x03, 0x0024, 2, page, 30));
+    nds_destroy(nds);
+
+    /* Command and address from different routines: the address's own run is
+     * measured. */
+    nds = idle_machine(rom, sizeof rom);
+    aux(nds, 0x02003000u, 0x06, 1);
+    aux(nds, 0x02003000u, 0x02, 0);
+    aux(nds, CMD_PC, 0x00, 0);
+    aux(nds, CMD_PC, 0x20, 0);
+    aux(nds, DATA_PC, 0x5A, 1);
+    CHECK(nds_save_type(nds) == NDS_SAVE_EEPROM_8K);
+    CHECK(aux_read_matches(nds, 0x03, 0x0020, 2, five_a, 1));
+    nds_destroy(nds);
+
+    /* Asking for the JEDEC ID first means FLASH. */
+    nds = idle_machine(rom, sizeof rom);
+    aux(nds, CMD_PC, 0x9F, 0);
+    CHECK(aux(nds, DATA_PC, 0, 0) == 0x20 && aux(nds, DATA_PC, 0, 0) == 0x40 && aux(nds, DATA_PC, 0, 1) == 0x12);
+    CHECK(nds_save_type(nds) == NDS_SAVE_FLASH_256K && nds_save_size(nds) == 0x40000);
+    aux_write(nds, 0x0A, 0x012345, 3, hello, 4);
+    CHECK(aux_read_matches(nds, 0x03, 0x012345, 3, hello, 4));
+    /* FAST READ has a dummy byte after the address. */
+    aux_cmd(nds, 0x0B, 0x012345, 3, 0);
+    aux(nds, DATA_PC, 0, 0);
+    CHECK(aux(nds, DATA_PC, 0, 1) == 0x12);
+    /* Page erase sets its 256 bytes to FFh. */
+    aux_cmd(nds, 0x06, 0, 0, 1);
+    aux_cmd(nds, 0xDB, 0x012300, 3, 1);
+    CHECK(aux_read_matches(nds, 0x03, 0x012345, 3, erased, 2));
+    /* Past 256 KiB it grows. */
+    aux_write(nds, 0x0A, 0x050000, 3, hello, 1);
+    CHECK(nds_save_type(nds) == NDS_SAVE_FLASH_512K);
+    nds_destroy(nds);
+
+    /* Three address bytes from a fresh chip: FLASH too. */
+    nds = idle_machine(rom, sizeof rom);
+    aux_write(nds, 0x02, 0x000010, 3, hello, 1);
+    CHECK(nds_save_type(nds) == NDS_SAVE_FLASH_256K);
+    nds_destroy(nds);
+
+    /* A save file's size picks the chip, and detection stays off. */
+    nds = idle_machine(rom, sizeof rom);
+    memset(file, 0, sizeof file);
+    file[0x40000] = 0xAB;
+    CHECK(!nds_save_load(nds, file, 1000));
+    CHECK(nds_save_load(nds, file, 0x80000) && nds_save_type(nds) == NDS_SAVE_FLASH_512K && !nds_save_dirty(nds));
+    CHECK(aux_read_matches(nds, 0x03, 0x040000, 3, ab, 1));
+    aux_write(nds, 0x0A, 0x10, 1, hello, 1); /* one byte would mean EEPROM, if detecting */
+    CHECK(nds_save_type(nds) == NDS_SAVE_FLASH_512K);
+    /* Survives a reset (the session restarts this way). */
+    nds_reset(nds);
+    park(nds);
+    CHECK(nds_save_type(nds) == NDS_SAVE_FLASH_512K && aux_read_matches(nds, 0x03, 0x040000, 3, ab, 1));
+    nds_destroy(nds);
+
+    /* A file-sized chip still grows: the file may come from a run whose
+     * detection stopped short. */
+    nds = idle_machine(rom, sizeof rom);
+    CHECK(nds_save_load(nds, file, 0x2000) && nds_save_type(nds) == NDS_SAVE_EEPROM_8K);
+    aux_write(nds, 0x02, 0x9000, 2, hello, 1);
+    CHECK(nds_save_type(nds) == NDS_SAVE_EEPROM_64K && aux_read_matches(nds, 0x03, 0x9000, 2, hello, 1));
+    nds_destroy(nds);
+
+    /* The override beats both. */
+    nds = idle_machine(rom, sizeof rom);
+    nds_set_save_type(nds, NDS_SAVE_FRAM_32K);
+    CHECK(nds_save_type(nds) == NDS_SAVE_FRAM_32K && nds_save_size(nds) == 0x8000);
+    CHECK(nds_save_load(nds, file, 0x2000) && nds_save_type(nds) == NDS_SAVE_FRAM_32K);
+    aux_write(nds, 0x02, 0x7FFF, 2, hello, 2); /* FRAM has no pages; wraps at its end */
+    CHECK(aux_read_matches(nds, 0x03, 0x0000, 2, hello + 1, 1));
+    nds_set_save_type(nds, NDS_SAVE_NONE);
+    CHECK(nds_save_size(nds) == 0 && aux_status(nds) == 0xFF);
+    CHECK(nds_save_type_from_name("flash1m") == NDS_SAVE_FLASH_1M &&
+          nds_save_type_from_name("x") == NDS_SAVE_TYPE_COUNT);
+    nds_destroy(nds);
+}
+
 /* ---- headless runner ---------------------------------------------------- */
 
 static uint8_t *read_file(const char *path, size_t *size) {
@@ -949,6 +1132,7 @@ int main(int argc, char **argv) {
     cart_checks();
     spi_checks();
     rtc_checks();
+    backup_checks();
     if (argc == 2) rom_checks(argv[1]);
     if (failures) {
         printf("test_nds: %d failure(s)\n", failures);
