@@ -66,7 +66,10 @@ for Assassin's Creed II: Discovery come from tracing that game's own AUXSPI
 traffic. The rockwrestler ROM (prebuilt, run only) and armwrestler (assembled
 from its public source with the GNU Arm toolchain, run only) are test inputs,
 not references. Their source was read only to learn how to drive them (which
-button opens which page) and what a failing test number checks.
+button opens which page) and what a failing test number checks. The BlocksDS
+SDK examples (github.com/blocksds/sdk, commit efcb131, built in its
+`skylyrac/blocksds:slim-latest` container) are 2D test inputs the same way;
+their source was read only for what each should show.
 
 **Video.** One XRGB8888 frame, 256×384: top screen over bottom, no gap, square
 pixels, so the frontends integer-scale it as they do the Game Boy. DS colors are
@@ -274,9 +277,18 @@ harness grows with each milestone, as `test_gb` did.
      Assassin's Creed II renders 3D on both screens (3D, capture into C/D,
      engine B showing the last capture as a direct-color BG, screens swapped
      each frame), so it shows only the white backdrop until M6.
-   - Open: no oracle comparison yet (needs built 2D examples and a black-box
-     run), and no 2D-heavy game on hand to reach gameplay with. Choices GBATEK
-     leaves open are listed at the top of `nds_gpu2d.c`.
+   - BlocksDS examples, 36 built from `graphics_2d`, `video_effects` and
+     `video_capture`, run headless with no faults and checked by eye against
+     what each says it shows, with input where the effect needs it: 8- and
+     16-bit and large bitmaps, 4/8bpp text BGs, extended palettes, rotation
+     and scaling (wrapped and not), big-map scrolling, regular, affine,
+     bitmap, animated and ext-palette sprites, alpha and bitmap-OBJ blending,
+     both windows, the OBJ window, an HDMA circular window, HBlank scroll
+     waves, mosaic, master brightness both ways, VRAM and FIFO display modes.
+     The capture examples need 3D and stay blank until M6.
+   - Open: a frame-for-frame comparison against a black-box oracle (melonDS),
+     and a 2D-heavy commercial game reaching gameplay; none is on hand. Choices
+     GBATEK leaves open are listed at the top of `nds_gpu2d.c`.
 5. **M4, sound.**
    - PCM8/PCM16/IMA-ADPCM/PSG/noise channels, capture, and the 48 kHz
      resampled mix.
