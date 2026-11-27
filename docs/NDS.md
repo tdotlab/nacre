@@ -3,8 +3,8 @@
 Status: M1 (CPUs, memory, BIOS, direct boot, test-ROM validation) and M2
 (timers, DMA, SPI, RTC, cart reads) done; M3 (2D) next. Both ARM CPUs run a
 cartridge from direct boot through our own BIOS, and display modes 0-3 show.
-Commercial games now boot past their loaders and then wait on backup memory
-(M5) or on 2D work (M3); see M2 below. armwrestler
+Commercial games now get further; two of the three tried wait on backup
+memory (M5). See M2 below. armwrestler
 passes all nine of its pages and rockwrestler all 23 of its tests, checked by
 frame hash in `make test`. Audio is still silent. The core runs at 74-80% of
 real time on the i5-8400 (see Risks). This file is the plan until the core exists, then it becomes the core's
@@ -206,10 +206,11 @@ harness grows with each milestone, as `test_gb` did.
      blank, as expected). Under M1 all three sat in their first IPC loop. Now
      Mario Kart DS streams its data from the cart and settles into a VBlank
      idle loop, polling its backup chip's status register. Assassin's Creed
-     (Altair's Chronicles) runs its ARM9 with the display set up. Assassin's
-     Creed II (DSi-enhanced) reads its save chip, gets nothing, and stops in
-     its fatal-error loop. Backup memory (M5) is the next blocker for all
-     three, then 2D.
+     (Altair's Chronicles) runs its ARM9 with the display set up and has not
+     touched its backup chip yet; what it waits on is still open. Assassin's
+     Creed II: Discovery (DSi-enhanced) reads its save chip, gets nothing, and
+     stops in its fatal-error loop. Backup memory (M5) blocks two of the
+     three; after that, 2D.
 4. **M3, 2D.**
    - Both engines: every BG mode including extended rotation and bitmaps,
      sprites, windows, blending, extended palettes, mosaic, master brightness
