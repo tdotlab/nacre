@@ -15,7 +15,7 @@ audio devices.
 | `src/gb/gb_apu.c` | Four channels, frame sequencer, 48 kHz stereo mix |
 | `src/gb/gb_cart.c` | Header checks, MBC1 (and multicart)/2/3/5, RTC, `.sav` format |
 | `src/gb/gb_state.c` | Game Boy save states: whole-machine snapshot with a build/ROM check; bad input is rejected without side effects |
-| `include/nds.h`, `src/nds/` | Nintendo DS core, in progress (see docs/NDS.md): ARM9/ARM7 interpreter (`nds_arm.c`), CP15, memory maps, I/O, our own BIOS and direct boot, basic display modes |
+| `include/nds.h`, `src/nds/` | Nintendo DS core, in progress (see docs/NDS.md): ARM9/ARM7 interpreter (`nds_arm.c`), CP15, memory maps, I/O, our own BIOS and direct boot, timers, DMA, SPI devices, RTC, cart reads, basic display modes |
 | `include/gb_input.h`, `src/gb_input.c` | Platform-neutral pad key bindings (Game Boy buttons plus DS X, Y, L, R and the hotkeys): defaults, lookup, steal-on-assign, versioned text form for preferences, which buttons a core labels |
 | `src/desktop/pad.c` | SDL3 gamepad layer shared by the Mac, Windows and Linux frontends |
 | `include/nacre_core.h`, `src/core/registry.c` | System-agnostic core interface (stepped or threaded cores, framebuffer or native-surface video, emulation-locked stereo audio, positional pad, battery saves, states, options) and the built-in core registry with probe-based detection |
@@ -23,7 +23,7 @@ audio devices.
 | `include/nacre_session.h`, `src/core/session.c` | One running game: core choice, candidate-swap open, sibling `.sav` with debounced writes, `.state1`..`.state4` slots, remembered per-core options, the native-video surface (attached after load, before the first run); file I/O through host callbacks |
 | `src/desktop/audio_out.c` | SDL3 output for any core: one stream at the core's rate, speed as frequency ratio, 40-150 ms queue, silent fast-forward |
 | `tests/test_gb.c`, `tools/get-gb-test-roms.py` | ROM-driven core checks; headless run/dump/press tool |
-| `tests/test_nds.c`, `tests/nds_test_rom.h`, `tools/get-nds-test-roms.py` | DS header, timing, input, math and machine checks on a synthetic ROM (program source in `tests/nds_test_rom.s`), armwrestler and rockwrestler by frame hash; headless run/press/touch/dump/bench tool |
+| `tests/test_nds.c`, `tests/nds_test_rom.h`, `tools/get-nds-test-roms.py` | DS header, timing, input, math, machine, timer, DMA, cart, SPI and RTC checks on a synthetic ROM (program source in `tests/nds_test_rom.s`), armwrestler and rockwrestler by frame hash; headless run/press/touch/dump/bench tool |
 | `src/macos/main.m` | ARC-managed AppKit app: native menus/panels, drawn sidebar and display, rebinding sheet; runs every registered core through a session, with the same per-system look table as Windows |
 | `src/macos/Info.plist.in` | Mac identity, version, document associations, OS requirement |
 | `src/windows/main.cpp` | Win32 + GDI+ app: window, owner-drawn controls, menus, dialogs, drop target, registry prefs; runs every registered core through a session, with per-system looks (keypad or pad, speed in Hz or ×) keyed by core id; gives native-video cores a child window in the display well |

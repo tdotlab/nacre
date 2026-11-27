@@ -168,14 +168,8 @@ static uint32_t gba_slot(Nds *nds, int cpu, uint32_t a, int size) {
 
 /* ---- ARM9 ---- */
 
-/* `kind`: 0 data read, 1 fetch, 2 write, 3 byte write. */
-static inline uint8_t *ptr9(Nds *nds, uint32_t a, int kind) {
-    const NdsCp15 *cp = &nds->cp15;
-    if ((kind == 2 || kind == 3 ? cp->itcm_write : cp->itcm_read) && !(a & cp->itcm_mask))
-        return nds->itcm + (a & (NDS_ITCM_SIZE - 1));
-    if (kind != 1 && (kind >= 2 ? cp->dtcm_write : cp->dtcm_read) &&
-        (a & cp->dtcm_mask) == cp->dtcm_base)
-        return nds->dtcm + (a & (NDS_DTCM_SIZE - 1));
+/* `kind`: 0 data read, 1 fetch, 2 write, 3 byte write. The bus behind the TCMs. */
+static inline uint8_t *ptr9_bus(Nds *nds, uint32_t a, int kind) {
     switch (a >> 24) {
     case 0x02:
         return nds->main_ram + (a & (NDS_MAIN_RAM_SIZE - 1));
@@ -197,6 +191,16 @@ static inline uint8_t *ptr9(Nds *nds, uint32_t a, int kind) {
     default:
         return NULL;
     }
+}
+
+static inline uint8_t *ptr9(Nds *nds, uint32_t a, int kind) {
+    const NdsCp15 *cp = &nds->cp15;
+    if ((kind == 2 || kind == 3 ? cp->itcm_write : cp->itcm_read) && !(a & cp->itcm_mask))
+        return nds->itcm + (a & (NDS_ITCM_SIZE - 1));
+    if (kind != 1 && (kind >= 2 ? cp->dtcm_write : cp->dtcm_read) &&
+        (a & cp->dtcm_mask) == cp->dtcm_base)
+        return nds->dtcm + (a & (NDS_DTCM_SIZE - 1));
+    return ptr9_bus(nds, a, kind);
 }
 
 static uint32_t slow9_read(Nds *nds, uint32_t a, int size) {
@@ -276,6 +280,33 @@ void nds9_write8(Nds *nds, uint32_t a, uint8_t v) {
     uint8_t *p = ptr9(nds, a, 3);
     if (p) *p = v;
     else slow9_write(nds, a, v, 1);
+}
+
+uint32_t nds9_dma_read32(Nds *nds, uint32_t a) {
+    uint8_t *p;
+    a &= ~3u;
+    p = ptr9_bus(nds, a, 0);
+    return p ? get32(p) : slow9_read(nds, a, 4);
+}
+uint16_t nds9_dma_read16(Nds *nds, uint32_t a) {
+    uint8_t *p;
+    a &= ~1u;
+    p = ptr9_bus(nds, a, 0);
+    return p ? get16(p) : (uint16_t)slow9_read(nds, a, 2);
+}
+void nds9_dma_write32(Nds *nds, uint32_t a, uint32_t v) {
+    uint8_t *p;
+    a &= ~3u;
+    p = ptr9_bus(nds, a, 2);
+    if (p) put32(p, v);
+    else slow9_write(nds, a, v, 4);
+}
+void nds9_dma_write16(Nds *nds, uint32_t a, uint16_t v) {
+    uint8_t *p;
+    a &= ~1u;
+    p = ptr9_bus(nds, a, 2);
+    if (p) put16(p, v);
+    else slow9_write(nds, a, v, 2);
 }
 
 /* ---- ARM7 ---- */

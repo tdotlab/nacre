@@ -34,9 +34,31 @@
 #define NDS_IRQ_VBLANK (1u << 0)
 #define NDS_IRQ_HBLANK (1u << 1)
 #define NDS_IRQ_VCOUNT (1u << 2)
+#define NDS_IRQ_TIMER(i) (1u << (3 + (i)))
+#define NDS_IRQ_DMA(i) (1u << (8 + (i)))
 #define NDS_IRQ_IPCSYNC (1u << 16)
 #define NDS_IRQ_FIFO_EMPTY (1u << 17)
 #define NDS_IRQ_FIFO_RECV (1u << 18)
+#define NDS_IRQ_CART_DONE (1u << 19)
+#define NDS_IRQ_SPI (1u << 23)
+
+/* The 256 KiB firmware flash and where its user settings live (GBATEK, "DS
+ * Firmware Header" and "DS Firmware User Settings"). */
+#define NDS_FIRMWARE_SIZE 0x40000u
+#define NDS_FIRMWARE_USER 0x3FE00u
+
+/* DMA start modes, shared by both CPUs (each CPU's own encoding is mapped). */
+enum {
+    NDS_DMA_IMMEDIATE,
+    NDS_DMA_VBLANK,
+    NDS_DMA_HBLANK,
+    NDS_DMA_DISPLAY_START,
+    NDS_DMA_MAIN_DISPLAY,
+    NDS_DMA_CART,
+    NDS_DMA_GBA,
+    NDS_DMA_GXFIFO,
+    NDS_DMA_WIFI,
+};
 
 /* Where the BIOS's guest-call trampoline returns to (an instruction that loops). */
 #define NDS_BIOS9_CALL_RETURN 0xFFFF0100u
@@ -82,6 +104,64 @@ typedef struct {
     uint32_t data[16];
     int head, count;
 } NdsFifo;
+
+/* One timer (GBATEK, "DS Timers"). The counter is brought up to date lazily:
+ * `updated` is the time, in ARM7 cycles, it was last advanced to, and `frac`
+ * the prescaler cycles since its last tick. */
+typedef struct {
+    uint16_t reload, control, counter;
+    uint32_t frac;
+    uint64_t updated;
+} NdsTimer;
+
+/* A DMA channel's internal registers, latched when it is enabled. The visible
+ * SAD, DAD and CNT stay in the I/O array, since they read back. */
+typedef struct {
+    uint32_t src, dst, count;
+} NdsDma;
+
+/* The cartridge bus in data mode (GBATEK, "DS Cartridge I/O Ports" and
+ * "Protocol"). A transfer's bytes are produced on demand; `ready` is when the
+ * whole block would have arrived on hardware, which is when DMA runs and the
+ * transfer ends. */
+typedef struct {
+    uint32_t romctrl;
+    uint16_t auxspicnt;
+    uint8_t auxspidata;
+    uint8_t command[8];
+    uint32_t address;       /* B7: start address, after redirection */
+    uint32_t length, pos;   /* block length and bytes read, in bytes */
+    uint64_t ready;
+    int pending;            /* the `ready` event has not happened yet */
+} NdsCart;
+
+/* The ARM7's SPI bus: firmware flash, touchscreen controller, power management
+ * (GBATEK, "DS Serial Peripheral Interface Bus (SPI)"). */
+typedef struct {
+    uint16_t control;
+    uint8_t data;
+    int active, device;     /* a device is selected and mid-command */
+    /* Firmware flash. */
+    uint8_t fw_command, fw_status;
+    uint32_t fw_step, fw_address;
+    /* Touchscreen controller: the bits still to shift out. */
+    uint16_t tsc_out;
+    /* Power management. */
+    uint8_t pm_index, pm_step, pm_regs[4];
+} NdsSpi;
+
+/* The RTC on its three-wire bus (GBATEK, "DS Real-Time Clock (RTC)"). Time is
+ * kept as seconds since 2000-01-01 00:00 local time: the host clock at power
+ * on, plus emulated time, plus whatever the game has set. */
+typedef struct {
+    uint16_t pins;          /* the register as last written */
+    int bits, index, reading, have_command;
+    uint8_t byte, command, buffer[8];
+    int out;                /* the bit the RTC drives on SIO */
+    uint8_t stat1, stat2, int1, alarm1[3], alarm2[3], adjust, free;
+    int64_t base;           /* local seconds since 2000 at cycle 0 */
+    int64_t offset;         /* added by the game setting the clock */
+} NdsRtc;
 
 struct Nds {
     uint8_t *rom;
@@ -142,17 +222,68 @@ struct Nds {
 
     uint8_t postflg[2];
 
+    NdsTimer timer[2][4];
+    NdsDma dma[2][4];
+    NdsCart cart;
+    NdsSpi spi;
+    NdsRtc rtc;
+    uint8_t firmware[NDS_FIRMWARE_SIZE];
+
     uint32_t framebuffer[NDS_FRAME_WIDTH * NDS_FRAME_HEIGHT];
 
     int16_t audio[NDS_AUDIO_RING * 2];
     size_t audio_read, audio_write; /* ring positions; equal when empty */
 };
 
+/* The time a CPU's own accesses happen at, in ARM7 cycles. */
+static inline uint64_t nds_now(const Nds *nds, int cpu) {
+    return cpu ? nds->arm7.cycles : nds->arm9.cycles >> 1;
+}
+
+/* Which CPU EXMEMCNT gives the DS cartridge slot to (bit 11: 0 = ARM9). */
+static inline int nds_cart_owner(const Nds *nds) { return (nds->io9[0x205] >> 3) & 1; }
+
 /* nds_cart.c */
 int nds_parse_header(const uint8_t *rom, size_t length, NdsHeader *header, char *error,
                      size_t error_capacity);
 void nds_banner_title(const uint8_t *rom, size_t length, const NdsHeader *header, char *out,
                       size_t capacity);
+uint32_t nds_cart_chip_id(const Nds *nds);
+void nds_cart_reset(Nds *nds);
+uint32_t nds_cart_read(Nds *nds, int cpu, uint32_t off);
+void nds_cart_write(Nds *nds, int cpu, uint32_t off, uint32_t value, uint32_t mask);
+uint32_t nds_cart_read_data(Nds *nds, int cpu);
+/* Runs the cart's `ready` event once emulated time reaches it. */
+void nds_cart_update(Nds *nds, uint64_t now);
+
+/* nds_timer.c */
+void nds_timer_reset(Nds *nds);
+uint32_t nds_timer_read(Nds *nds, int cpu, uint32_t off);
+void nds_timer_write(Nds *nds, int cpu, uint32_t off, uint32_t value, uint32_t mask);
+/* Advances one CPU's timers to `now`, raising overflow IRQs. */
+void nds_timer_update(Nds *nds, int cpu, uint64_t now);
+/* The earliest time an overflow needs handling on time (an IRQ, or a cascade
+ * into a timer that might raise one), or UINT64_MAX. */
+uint64_t nds_timer_next_event(const Nds *nds, int cpu);
+
+/* nds_dma.c */
+void nds_dma_reset(Nds *nds);
+void nds_dma_write(Nds *nds, int cpu, uint32_t off, uint32_t value, uint32_t mask);
+/* Runs every enabled channel of `cpu` waiting on `mode`. */
+void nds_dma_trigger(Nds *nds, int cpu, int mode);
+/* Whether `cpu` has a channel enabled in `mode`. */
+int nds_dma_waiting(const Nds *nds, int cpu, int mode);
+
+/* nds_spi.c */
+void nds_spi_reset(Nds *nds);
+void nds_firmware_build(Nds *nds);
+uint32_t nds_spi_read(Nds *nds);
+void nds_spi_write(Nds *nds, uint32_t value, uint32_t mask);
+
+/* nds_rtc.c */
+void nds_rtc_reset(Nds *nds);
+uint32_t nds_rtc_read(Nds *nds);
+void nds_rtc_write(Nds *nds, uint32_t value, uint32_t mask);
 
 /* nds_mem.c: each CPU's bus. Addresses are aligned to the access size here. */
 uint32_t nds9_read32(Nds *nds, uint32_t addr);
@@ -169,6 +300,11 @@ uint8_t nds7_read8(Nds *nds, uint32_t addr);
 void nds7_write32(Nds *nds, uint32_t addr, uint32_t value);
 void nds7_write16(Nds *nds, uint32_t addr, uint16_t value);
 void nds7_write8(Nds *nds, uint32_t addr, uint8_t value);
+/* The ARM9's bus as DMA sees it: no TCM. */
+uint32_t nds9_dma_read32(Nds *nds, uint32_t addr);
+uint16_t nds9_dma_read16(Nds *nds, uint32_t addr);
+void nds9_dma_write32(Nds *nds, uint32_t addr, uint32_t value);
+void nds9_dma_write16(Nds *nds, uint32_t addr, uint16_t value);
 void nds_mem_reset(Nds *nds);
 void nds_map_wram(Nds *nds);
 void nds_map_vram(Nds *nds);

@@ -1,7 +1,8 @@
 /* I/O registers at 0x04000000 for both CPUs (GBATEK, "DS I/O Maps"). Accesses
  * arrive as aligned 32-bit words with a byte mask, so a byte or halfword write
- * touches only its own bytes. Registers without behavior yet (timers, DMA, sound,
- * the 2D engines' layer registers) are stored and read back. */
+ * touches only its own bytes. Registers without behavior yet (sound, the 2D
+ * engines' layer registers) are stored and read back. Timers, DMA, the cart
+ * bus, SPI and the RTC have files of their own. */
 
 #include "nds_internal.h"
 
@@ -204,7 +205,10 @@ uint32_t nds_io_read(Nds *nds, int cpu, uint32_t addr) {
     uint32_t off = addr - 0x04000000u;
     const uint8_t *io = cpu ? nds->io7 : nds->io9;
     if (addr == 0x04100000u) return fifo_receive(nds, cpu);
+    if (addr == 0x04100010u) return nds_cart_read_data(nds, cpu);
     if (off >= NDS_IO_SIZE) return 0;
+    if (off >= 0x100 && off < 0x110) return nds_timer_read(nds, cpu, off);
+    if (off >= 0x1A0 && off < 0x1C0) return nds_cart_read(nds, cpu, off);
     switch (off) {
     case 0x004: return nds_dispstat_read(nds, cpu) | (nds->line << 16);
     case 0x130: return keyinput(nds) | (raw_get(io, 0x130) & 0xFFFF0000u);
@@ -212,7 +216,8 @@ uint32_t nds_io_read(Nds *nds, int cpu, uint32_t addr) {
     case 0x180: return ipcsync_read(nds, cpu);
     case 0x184: return fifocnt_read(nds, cpu);
     case 0x188: return 0;
-    case 0x1C0: return cpu ? raw_get(io, 0x1C0) & ~0x80u : raw_get(io, 0x1C0); /* SPI never busy */
+    case 0x138: return cpu ? nds_rtc_read(nds) : 0;
+    case 0x1C0: return cpu ? nds_spi_read(nds) : 0;
     case 0x204:
         if (cpu) return (raw_get(nds->io7, 0x204) & 0x7F) | (raw_get(nds->io9, 0x204) & 0xFF80);
         return raw_get(io, 0x204) & 0xFFFF;
@@ -255,6 +260,18 @@ void nds_io_write(Nds *nds, int cpu, uint32_t addr, uint32_t v, uint32_t mask) {
     uint32_t off = addr - 0x04000000u;
     uint8_t *io = cpu ? nds->io7 : nds->io9;
     if (off >= NDS_IO_SIZE) return;
+    if (off >= 0xB0 && off < 0xE0) {
+        nds_dma_write(nds, cpu, off, v, mask);
+        return;
+    }
+    if (off >= 0x100 && off < 0x110) {
+        nds_timer_write(nds, cpu, off, v, mask);
+        return;
+    }
+    if (off >= 0x1A0 && off < 0x1C0) {
+        nds_cart_write(nds, cpu, off, v, mask);
+        return;
+    }
     switch (off) {
     case 0x004:
         nds->dispstat[cpu] = (uint16_t)merge(nds->dispstat[cpu], v, mask & 0xFFB8);
@@ -262,8 +279,14 @@ void nds_io_write(Nds *nds, int cpu, uint32_t addr, uint32_t v, uint32_t mask) {
     case 0x130:
         raw_put(io, off, v, mask & 0xFFFF0000u); /* KEYCNT; KEYINPUT is read-only */
         return;
+    case 0x138:
+        if (cpu) nds_rtc_write(nds, v, mask);
+        return;
     case 0x180:
         ipcsync_write(nds, cpu, v, mask);
+        return;
+    case 0x1C0:
+        if (cpu) nds_spi_write(nds, v, mask);
         return;
     case 0x184:
         fifocnt_write(nds, cpu, v, mask);

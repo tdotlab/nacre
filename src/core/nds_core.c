@@ -135,6 +135,10 @@ static void set_pointer(void *self, unsigned port, int x, int y, int pressed) {
         nds_set_touch(core->nds, -1, -1, 0);
 }
 
+static void set_wall_clock(void *self, int64_t unix_seconds) {
+    nds_set_wall_clock(((NdsCore *)self)->nds, unix_seconds);
+}
+
 static const char *title(void *self) {
     NdsCore *core = (NdsCore *)self;
     const char *text = core->loaded ? nds_title(core->nds) : NULL;
@@ -176,5 +180,6 @@ const NacreCore nacre_nds_core = {
     .audio_clear = audio_clear,
     .set_pad = set_pad,
     .set_pointer = set_pointer,
+    .set_wall_clock = set_wall_clock,
     .title = title,
 };

@@ -65,6 +65,12 @@ void nds_set_button(Nds *nds, NdsButton button, int pressed);
 /* A touch on the bottom screen, in its pixels (0..255, 0..191). */
 void nds_set_touch(Nds *nds, int x, int y, int pressed);
 
+/* Sets the real-time clock from Unix seconds; the time the game has set
+ * itself is kept as an offset. The DS keeps local time, so pass seconds
+ * shifted by the host's UTC offset to show local time. Before any call the
+ * clock starts at 2000-01-01 00:00. */
+void nds_set_wall_clock(Nds *nds, int64_t unix_seconds);
+
 /* Interleaved stereo int16 at NDS_AUDIO_SAMPLE_RATE. Returns frames copied. The
  * internal buffer holds about a third of a second; older samples are dropped. */
 size_t nds_audio_read(Nds *nds, int16_t *stereo, size_t max_frames);

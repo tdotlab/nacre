@@ -1,8 +1,10 @@
 # Nintendo DS core
 
-Status: M1 (CPUs, memory, BIOS, direct boot, test-ROM validation) done; M2
-(timers, DMA, SPI, RTC, cart reads) next. Both ARM CPUs run a cartridge from
-direct boot through our own BIOS, and display modes 0-3 show. armwrestler
+Status: M1 (CPUs, memory, BIOS, direct boot, test-ROM validation) and M2
+(timers, DMA, SPI, RTC, cart reads) done; M3 (2D) next. Both ARM CPUs run a
+cartridge from direct boot through our own BIOS, and display modes 0-3 show.
+Commercial games now boot past their loaders and then wait on backup memory
+(M5) or on 2D work (M3); see M2 below. armwrestler
 passes all nine of its pages and rockwrestler all 23 of its tests, checked by
 frame hash in `make test`. Audio is still silent. The core runs at 74-80% of
 real time on the i5-8400 (see Risks). This file is the plan until the core exists, then it becomes the core's
@@ -20,11 +22,12 @@ PS2 builds on Windows only.
 | File | Holds |
 | --- | --- |
 | `include/nds.h` | Public API, same pattern as `gb.h`: create, load, advance_ns, framebuffer, buttons, touch, audio ring, saves, states, title |
-| `src/nds/nds.c`, `nds_internal.h` | Machine, both buses and memory maps, VRAM bank mapping, scheduler, IRQs, timers, DMA, IPC sync/FIFO, math unit, keypad |
+| `src/nds/nds.c`, `nds_internal.h` | Machine and line scheduler; with `nds_mem.c` and `nds_io.c`, both buses and memory maps, VRAM bank mapping, IRQs, IPC sync/FIFO, math unit, keypad |
+| `src/nds/nds_timer.c`, `nds_dma.c` | The four timers and four DMA channels of each CPU |
 | `src/nds/nds_arm.c` | One ARM/Thumb interpreter for both CPUs: ARMv5TE for the ARM946E-S, ARMv4T for the ARM7TDMI |
 | `src/nds/nds_cp15.c` | ARM9 coprocessor: protection unit, ITCM/DTCM placement, cache control (caches are not modelled) |
 | `src/nds/nds_bios.c` | Our own BIOS: the SWI calls games use, implemented from the docs, plus direct boot |
-| `src/nds/nds_cart.c` | Header, ROM commands in data mode, backup chips (EEPROM, flash, FRAM) |
+| `src/nds/nds_cart.c` | Header, chip ID, ROM commands in data mode and cart DMA; backup chips (EEPROM, flash, FRAM) in M5 |
 | `src/nds/nds_spi.c` | Firmware (generated user settings), touchscreen controller, power management |
 | `src/nds/nds_rtc.c` | Real-time clock |
 | `src/nds/nds_gpu2d.c` | Both 2D engines, master brightness, display capture |
@@ -52,7 +55,8 @@ outside source beyond GBATEK and test ROM READMEs is logged here, with what was
 learned, in behavior terms. That keeps "our own code" true and checkable.
 
 Sources used so far: GBATEK (CPU, CP15, memory maps, I/O, BIOS functions, boot
-state). The rockwrestler ROM (prebuilt, run only) and armwrestler (assembled
+state and BIOS RAM usage, timers, DMA, cartridge protocol and chip IDs, SPI,
+firmware, touchscreen, power management, RTC). The rockwrestler ROM (prebuilt, run only) and armwrestler (assembled
 from its public source with the GNU Arm toolchain, run only) are test inputs,
 not references. Their source was read only to learn how to drive them (which
 button opens which page) and what a failing test number checks.
@@ -171,12 +175,41 @@ harness grows with each milestone, as `test_gb` did.
    - BlocksDS stays optional.
    - Deferred to M2: timers, DMA, SPI (firmware settings, touch, power), RTC
      and cart data-mode reads.
-3. **M2, the rest of the system.**
-   - IRQs, timers, DMA, IPC, the math unit, keypad, SPI (firmware, touch,
-     power), RTC, and cart data-mode reads.
-   - Frontend touch input.
-   - Done when the BlocksDS/libnds examples for console text, timers, touch,
-     RTC and IPC behave, with frame hashes in the test suite.
+3. **M2, the rest of the system.** Done.
+   - Timers (`nds_timer.c`): prescalers, count-up, IRQs. Counters advance
+     lazily, and the scheduler ends a slice at the next IRQ-raising overflow,
+     so the IRQ lands on its cycle. Time is counted in ARM7 cycles.
+   - DMA (`nds_dma.c`): immediate, VBlank, HBlank (visible lines only),
+     display start, main-display and cart triggers, repeat, fill and the
+     address modes. A block runs at once and charges its CPU an estimate. ARM9
+     DMA bypasses the TCMs.
+   - Cart (`nds_cart.c`): ROMCTRL/AUXSPICNT, data-mode commands B7 (reads that
+     stay in their 4 KiB block, the secure area folding onto 8000h, mirroring at
+     the chip size, FFh past the image), 00 (header) and 90/B8 (chip ID), busy
+     time from the ROMCTRL clock and gaps, the done IRQ, cart DMA, and slot
+     ownership from EXMEMCNT bit 11. The KEY2 bits are accepted and ignored:
+     after a direct boot the game sees plain data. The chip ID carries bit 31
+     for carts of 128 MiB and up, and bit 30 for DSi-enhanced headers (unit
+     code bit 1), which those games compare at boot.
+   - SPI (`nds_spi.c`): the firmware flash with a generated image (header,
+     wifi block, two user-settings copies), the touchscreen controller fed
+     from `set_pointer`, and the power-management chip. Direct boot now fills
+     the BIOS RAM block at 27FF800h/27FFC00h the way the firmware does.
+   - RTC (`nds_rtc.c`): the bit-banged S-35180, with LSB-first and MSB-first
+     commands, date/time, status and alarm registers, and leap years to 2099.
+     `nds_set_wall_clock` takes Unix seconds and the session passes UTC, so the
+     DS shows UTC until the frontends pass local time (M5).
+   - Checked by `tests/test_nds.c` at register level (timer, DMA, cart, SPI
+     and RTC checks against GBATEK's numbers) rather than the libnds examples
+     the plan named: their console text needs M3's tile engine.
+   - Smoke test, 10 headless seconds of three commercial games (frames still
+     blank, as expected). Under M1 all three sat in their first IPC loop. Now
+     Mario Kart DS streams its data from the cart and settles into a VBlank
+     idle loop, polling its backup chip's status register. Assassin's Creed
+     (Altair's Chronicles) runs its ARM9 with the display set up. Assassin's
+     Creed II (DSi-enhanced) reads its save chip, gets nothing, and stops in
+     its fatal-error loop. Backup memory (M5) is the next blocker for all
+     three, then 2D.
 4. **M3, 2D.**
    - Both engines: every BG mode including extended rotation and bitmaps,
      sprites, windows, blending, extended palettes, mosaic, master brightness

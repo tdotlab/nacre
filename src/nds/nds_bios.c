@@ -71,7 +71,8 @@ static void boot_cpu(NdsArm *c, uint32_t entry, uint32_t sp_sys, uint32_t sp_irq
 
 void nds_direct_boot(Nds *nds) {
     const NdsHeader *h = &nds->header;
-    uint32_t mb = (0x20000u << (h->capacity & 15)) >> 20, chip_id = 0xC2u | ((mb ? mb - 1 : 0) << 8);
+    uint32_t chip_id = nds_cart_chip_id(nds);
+    const uint8_t *user = nds->firmware + NDS_FIRMWARE_USER + 0x100; /* the newer area */
     size_t header_bytes = nds->rom_size < 0x170 ? nds->rom_size : 0x170;
 
     nds->wramcnt = 3; /* all shared WRAM to the ARM7 */
@@ -86,12 +87,23 @@ void nds_direct_boot(Nds *nds) {
         nds7_write8(nds, h->arm7_address + i, nds->rom[h->arm7_offset + i]);
     for (size_t i = 0; i < header_bytes; i++) nds9_write8(nds, 0x027FFE00u + (uint32_t)i, nds->rom[i]);
 
-    nds9_write32(nds, 0x027FF800u, chip_id);
-    nds9_write32(nds, 0x027FF804u, chip_id);
-    nds9_write32(nds, 0x027FFC00u, chip_id);
-    nds9_write32(nds, 0x027FFC04u, chip_id);
+    /* What the BIOS and firmware leave in main RAM (GBATEK, "BIOS RAM
+     * Usage"); the block at 27FF800h is mirrored at 27FFC00h. */
+    for (uint32_t mirror = 0x027FF800u; mirror <= 0x027FFC00u; mirror += 0x400) {
+        nds9_write32(nds, mirror + 0x00, chip_id);
+        nds9_write32(nds, mirror + 0x04, chip_id);
+        nds9_write16(nds, mirror + 0x08, (uint16_t)(nds->rom[0x15E] | nds->rom[0x15F] << 8));
+        nds9_write16(nds, mirror + 0x0A, (uint16_t)(nds->rom[0x6C] | nds->rom[0x6D] << 8));
+    }
+    nds9_write16(nds, 0x027FF810u, 0xFFFF); /* boot handler task */
+    nds9_write16(nds, 0x027FF850u, 0x5835); /* ARM7 BIOS CRC */
     nds9_write16(nds, 0x027FFC10u, 0x5835);
+    nds9_write32(nds, 0x027FF868u, NDS_FIRMWARE_USER);
+    nds9_write16(nds, 0x027FF874u, (uint16_t)(nds->firmware[0x26] | nds->firmware[0x27] << 8));
+    nds9_write32(nds, 0x027FF880u, 7); /* the boot handshake's last messages */
+    nds9_write32(nds, 0x027FF884u, 6);
     nds9_write16(nds, 0x027FFC40u, 1); /* booted from a cartridge */
+    for (uint32_t i = 0; i < 0x70; i++) nds9_write8(nds, 0x027FFC80u + i, user[i]);
     nds7_write32(nds, 0x0380F980u, 0xFBDD37BBu);
 
     nds->postflg[0] = nds->postflg[1] = 1;

@@ -41,6 +41,7 @@ int nds_load_rom(Nds *nds, const uint8_t *rom, size_t length, char *error, size_
 int nds_has_rom(const Nds *nds) { return nds->rom != NULL; }
 
 void nds_reset(Nds *nds) {
+    nds->rtc.base += (int64_t)(nds->arm7.cycles / NDS_ARM7_HZ); /* the clock keeps running */
     nds->cycles = 0;
     nds->frame_cycle = 0;
     nds->frame_count = 0;
@@ -56,6 +57,12 @@ void nds_reset(Nds *nds) {
     nds_arm_reset(&nds->arm9, nds, 1);
     nds_arm_reset(&nds->arm7, nds, 0);
     nds_cp15_reset(nds);
+    nds_timer_reset(nds);
+    nds_dma_reset(nds);
+    nds_cart_reset(nds);
+    nds_spi_reset(nds);
+    nds_firmware_build(nds);
+    nds_rtc_reset(nds);
     nds_bios_build(nds);
     if (nds->rom) nds_direct_boot(nds);
 }
@@ -89,11 +96,26 @@ static void display_irq(Nds *nds, uint32_t enable_bit, uint32_t irq) {
 }
 
 static void start_line(Nds *nds) {
-    if (nds->line == NDS_SCREEN_HEIGHT) display_irq(nds, 1u << 3, NDS_IRQ_VBLANK);
+    if (nds->line == NDS_SCREEN_HEIGHT) {
+        display_irq(nds, 1u << 3, NDS_IRQ_VBLANK);
+        nds_dma_trigger(nds, 0, NDS_DMA_VBLANK);
+        nds_dma_trigger(nds, 1, NDS_DMA_VBLANK);
+    }
+    if (nds->line == 0) nds_dma_trigger(nds, 0, NDS_DMA_DISPLAY_START);
+    if (nds->line < NDS_SCREEN_HEIGHT) nds_dma_trigger(nds, 0, NDS_DMA_MAIN_DISPLAY);
     for (int cpu = 0; cpu < 2; cpu++) {
         uint32_t ds = nds->dispstat[cpu], target = (ds >> 8) | ((ds & 0x80) << 1);
         if ((ds & (1u << 5)) && nds->line == target) nds_irq_raise(nds, cpu, NDS_IRQ_VCOUNT);
     }
+}
+
+/* The next time something besides the display needs handling: a timer
+ * overflow that raises an IRQ, or the end of a cart transfer. */
+static uint64_t next_event(const Nds *nds) {
+    uint64_t at = nds_timer_next_event(nds, 0), t = nds_timer_next_event(nds, 1);
+    if (t < at) at = t;
+    if (nds->cart.pending && nds->cart.ready < at) at = nds->cart.ready;
+    return at;
 }
 
 int nds_run_cycles(Nds *nds, uint32_t cycles, char *error, size_t error_capacity) {
@@ -103,8 +125,10 @@ int nds_run_cycles(Nds *nds, uint32_t cycles, char *error, size_t error_capacity
     while (cycles) {
         uint32_t event = nds->line_cycle < NDS_HBLANK_CYCLE ? NDS_HBLANK_CYCLE : NDS_LINE_CYCLES;
         uint32_t step = event - nds->line_cycle;
+        uint64_t at = next_event(nds);
         if (step > NDS_SLICE) step = NDS_SLICE;
         if (step > cycles) step = cycles;
+        if (at > nds->cycles && at - nds->cycles < step) step = (uint32_t)(at - nds->cycles);
         nds_arm_run(&nds->arm9, (nds->cycles + step) * 2);
         nds_arm_run(&nds->arm7, nds->cycles + step);
         produce_audio(nds, step);
@@ -112,8 +136,14 @@ int nds_run_cycles(Nds *nds, uint32_t cycles, char *error, size_t error_capacity
         nds->frame_cycle += step;
         nds->line_cycle += step;
         cycles -= step;
+        nds_timer_update(nds, 0, nds->cycles);
+        nds_timer_update(nds, 1, nds->cycles);
+        nds_cart_update(nds, nds->cycles);
         if (nds->line_cycle == NDS_HBLANK_CYCLE) {
-            if (nds->line < NDS_SCREEN_HEIGHT) nds_render_line(nds, nds->line);
+            if (nds->line < NDS_SCREEN_HEIGHT) {
+                nds_render_line(nds, nds->line);
+                nds_dma_trigger(nds, 0, NDS_DMA_HBLANK); /* paused during VBlank */
+            }
             display_irq(nds, 1u << 4, NDS_IRQ_HBLANK);
         } else if (nds->line_cycle == NDS_LINE_CYCLES) {
             nds->line_cycle = 0;

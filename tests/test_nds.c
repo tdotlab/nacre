@@ -240,6 +240,367 @@ static void input_checks(void) {
     nds_destroy(nds);
 }
 
+/* ---- M2: timers, DMA, the cart bus, SPI and the RTC --------------------- */
+
+/* Both CPUs halted with no IRQs enabled, so time passes without the test
+ * program touching anything. */
+static void park(Nds *nds) {
+    for (int cpu = 0; cpu < 2; cpu++) nds->ie[cpu] = nds->ime[cpu] = 0;
+    nds->arm9.halted = nds->arm7.halted = 1;
+}
+
+static Nds *idle_machine(const uint8_t *image, size_t size) {
+    Nds *nds = nds_create();
+    if (!nds_load_rom(nds, image, size, error, sizeof error)) {
+        printf("FAIL idle_machine: %s\n", error);
+        failures++;
+    }
+    park(nds);
+    return nds;
+}
+
+static void advance(Nds *nds, uint32_t cycles) { nds_run_cycles(nds, cycles, error, sizeof error); }
+
+static void timer_checks(void) {
+    Nds *nds;
+    nds_test_make_rom(rom, NULL);
+    nds = idle_machine(rom, sizeof rom);
+    /* ARM7 timer 0 from FF00h with its IRQ: the overflow comes 256 cycles on. */
+    nds7_write32(nds, 0x04000100u, 0xFF00u | (0xC0u << 16));
+    CHECK(nds7_read16(nds, 0x04000100u) == 0xFF00);
+    advance(nds, 255);
+    CHECK(nds7_read16(nds, 0x04000100u) == 0xFFFF && !(nds->irf[1] & NDS_IRQ_TIMER(0)));
+    advance(nds, 1);
+    CHECK((nds->irf[1] & NDS_IRQ_TIMER(0)) && nds7_read16(nds, 0x04000100u) == 0xFF00);
+    CHECK(!(nds->irf[0] & NDS_IRQ_TIMER(0))); /* each CPU has its own timers */
+    /* ARM9 timer 1 at F/64 runs on the same 33 MHz clock: 640 cycles, 10 ticks. */
+    nds9_write16(nds, 0x04000104u, 0);
+    nds9_write16(nds, 0x04000106u, 0x81);
+    advance(nds, 640);
+    CHECK(nds9_read16(nds, 0x04000104u) == 10);
+    nds9_write16(nds, 0x04000106u, 0); /* stopping holds the count */
+    advance(nds, 640);
+    CHECK(nds9_read16(nds, 0x04000104u) == 10);
+    /* The reload reaches the counter only when the timer starts. */
+    nds9_write16(nds, 0x04000104u, 0x1234);
+    CHECK(nds9_read16(nds, 0x04000104u) == 10);
+    nds9_write16(nds, 0x04000106u, 0x80);
+    CHECK(nds9_read16(nds, 0x04000104u) == 0x1234);
+    /* Count-up: ARM7 timer 2 overflows every cycle; timer 3 counts those and
+     * raises its IRQ on the second. */
+    nds7_write32(nds, 0x0400010Cu, 0xFFFEu | (0xC4u << 16));
+    nds7_write32(nds, 0x04000108u, 0xFFFFu | (0x80u << 16));
+    advance(nds, 1);
+    CHECK(!(nds->irf[1] & NDS_IRQ_TIMER(3)));
+    advance(nds, 1);
+    CHECK((nds->irf[1] & NDS_IRQ_TIMER(3)) && !(nds->irf[1] & NDS_IRQ_TIMER(2)));
+    nds_destroy(nds);
+}
+
+#define DMA_ON 0x80000000u
+#define DMA_IRQ (1u << 30)
+#define DMA_WORD (1u << 26)
+#define DMA_REPEAT (1u << 25)
+#define DMA_SRC_FIXED (2u << 23)
+#define DMA_DST_DOWN (1u << 21)
+#define DMA9_MODE(m) ((uint32_t)(m) << 27)
+#define DMA7_MODE(m) ((uint32_t)(m) << 28)
+
+static void dma_checks(void) {
+    Nds *nds;
+    nds_test_make_rom(rom, NULL);
+    nds = idle_machine(rom, sizeof rom);
+    for (uint32_t i = 0; i < 8; i++) nds9_write32(nds, 0x02200000u + i * 4, 0x11110000u + i);
+    /* Immediate, 32-bit, four words, with its IRQ; then the channel turns off. */
+    nds9_write32(nds, 0x040000B0u, 0x02200000u);
+    nds9_write32(nds, 0x040000B4u, 0x02210000u);
+    nds9_write32(nds, 0x040000B8u, DMA_ON | DMA_IRQ | DMA_WORD | 4);
+    CHECK(nds9_read32(nds, 0x02210000u) == 0x11110000u && nds9_read32(nds, 0x0221000Cu) == 0x11110003u);
+    CHECK(nds9_read32(nds, 0x02210010u) == 0);
+    CHECK(!(nds9_read32(nds, 0x040000B8u) & DMA_ON) && (nds->irf[0] & NDS_IRQ_DMA(0)));
+    /* A fixed source fills, 16-bit; a decrementing destination runs down. */
+    nds9_write32(nds, 0x040000BCu, 0x02200004u);
+    nds9_write32(nds, 0x040000C0u, 0x02220006u);
+    nds9_write32(nds, 0x040000C4u, DMA_ON | DMA_SRC_FIXED | DMA_DST_DOWN | 4);
+    CHECK(nds9_read16(nds, 0x02220000u) == 0x0001 && nds9_read16(nds, 0x02220006u) == 0x0001);
+    CHECK(nds9_read16(nds, 0x02220008u) == 0);
+    /* ARM9 DMA goes past the DTCM (at 027C0000h after direct boot) to main RAM. */
+    nds9_write32(nds, 0x027C0000u, 0xDEADBEEFu);
+    nds9_write32(nds, 0x040000B0u, 0x02200000u);
+    nds9_write32(nds, 0x040000B4u, 0x027C0000u);
+    nds9_write32(nds, 0x040000B8u, DMA_ON | DMA_WORD | 1);
+    CHECK(nds9_read32(nds, 0x027C0000u) == 0xDEADBEEFu);
+    CHECK(nds->main_ram[0x3C0000] == 0x00 && nds->main_ram[0x3C0003] == 0x11);
+    /* ARM7 VBlank DMA waits for line 192. */
+    nds7_write32(nds, 0x0380F000u, 0xCAFEF00Du);
+    nds7_write32(nds, 0x0380F100u, 0);
+    nds7_write32(nds, 0x040000B0u, 0x0380F000u);
+    nds7_write32(nds, 0x040000B4u, 0x0380F100u);
+    nds7_write32(nds, 0x040000B8u, DMA_ON | DMA7_MODE(1) | DMA_WORD | 1);
+    CHECK(nds7_read32(nds, 0x0380F100u) == 0);
+    advance(nds, 192 * NDS_LINE_CYCLES - 1);
+    CHECK(nds7_read32(nds, 0x0380F100u) == 0);
+    advance(nds, 1);
+    CHECK(nds7_read32(nds, 0x0380F100u) == 0xCAFEF00Du);
+    nds_destroy(nds);
+    /* ARM9 HBlank DMA with repeat: one word a line, on visible lines only. */
+    nds = idle_machine(rom, sizeof rom);
+    nds9_write32(nds, 0x02200000u, 0x5A5A5A5Au);
+    nds9_write32(nds, 0x040000C8u, 0x02200000u);
+    nds9_write32(nds, 0x040000CCu, 0x02230000u);
+    nds9_write32(nds, 0x040000D0u, DMA_ON | DMA9_MODE(2) | DMA_WORD | DMA_REPEAT | DMA_SRC_FIXED | 1);
+    advance(nds, 2 * NDS_LINE_CYCLES + NDS_HBLANK_CYCLE + 1);
+    CHECK(nds9_read32(nds, 0x02230008u) == 0x5A5A5A5Au && nds9_read32(nds, 0x0223000Cu) == 0);
+    CHECK(nds9_read32(nds, 0x040000D0u) & DMA_ON); /* still armed */
+    advance(nds, 190 * NDS_LINE_CYCLES);
+    CHECK(nds9_read32(nds, 0x022302FCu) == 0x5A5A5A5Au && nds9_read32(nds, 0x02230300u) == 0);
+    nds_destroy(nds);
+}
+
+/* Sends a cart command (a byte and a big-endian word) with block size `bs`
+ * at the default 6.7 MHz. */
+static void cart_command(Nds *nds, uint8_t command, uint32_t param, uint32_t bs) {
+    nds9_write32(nds, 0x040001A8u, command | (param >> 24) << 8 | ((param >> 16) & 0xFF) << 16 |
+                                       ((param >> 8) & 0xFF) << 24);
+    nds9_write32(nds, 0x040001ACu, param & 0xFF);
+    nds9_write32(nds, 0x040001A4u, 0xA0000000u | bs << 24);
+}
+
+static uint32_t le32(const uint8_t *p) {
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+static void cart_checks(void) {
+    static uint8_t big[0x10000];
+    Nds *nds;
+    int same = 1;
+    /* B7 cannot read below 8000h, so the image gets a patterned second half. */
+    nds_test_make_rom(rom, NULL);
+    memcpy(big, rom, sizeof rom);
+    for (uint32_t i = sizeof rom; i < sizeof big; i++) big[i] = (uint8_t)(i * 7 + (i >> 8));
+    nds = idle_machine(big, sizeof big);
+    CHECK(nds_cart_chip_id(nds) == 0xC2u && nds9_read32(nds, 0x027FF800u) == 0xC2u);
+    {
+        /* A DSi-enhanced header (unit code 2) gets bit 30 in the chip ID. */
+        Nds *dsi;
+        uint16_t crc;
+        big[0x12] = 2;
+        crc = nds_crc16(0xFFFF, big, 0x15E);
+        big[0x15E] = (uint8_t)crc;
+        big[0x15F] = (uint8_t)(crc >> 8);
+        dsi = idle_machine(big, sizeof big);
+        CHECK(nds_cart_chip_id(dsi) == 0x400000C2u && nds9_read32(dsi, 0x027FF800u) == 0x400000C2u);
+        nds_destroy(dsi);
+        memcpy(big, rom, sizeof rom);
+    }
+    /* B7 at 8000h, 200h bytes: data at once, busy until the block's time is up
+     * (5 cycles a byte for 8 command bytes and 200h data), then the IRQ. */
+    nds9_write16(nds, 0x040001A0u, 0xC000);
+    cart_command(nds, 0xB7, 0x8000, 1);
+    CHECK(nds9_read32(nds, 0x040001A4u) & 0x00800000u);
+    for (uint32_t i = 0; i < 0x200; i += 4)
+        if (nds9_read32(nds, 0x04100010u) != le32(big + 0x8000 + i)) same = 0;
+    CHECK(same);
+    CHECK((nds9_read32(nds, 0x040001A4u) & 0x80800000u) == 0x80000000u);
+    advance(nds, 5 * (8 + 0x200) - 1);
+    CHECK(nds9_read32(nds, 0x040001A4u) & 0x80000000u);
+    advance(nds, 1);
+    CHECK(!(nds9_read32(nds, 0x040001A4u) & 0x80000000u) && (nds->irf[0] & NDS_IRQ_CART_DONE));
+    /* The secure area folds onto 8000h; a read stays inside its 4 KiB block. */
+    cart_command(nds, 0xB7, 0x1004, 7);
+    CHECK(nds9_read32(nds, 0x04100010u) == le32(big + 0x8004));
+    advance(nds, 100);
+    cart_command(nds, 0xB7, 0x8F00, 1);
+    for (int i = 0; i < 0x40; i++) nds9_read32(nds, 0x04100010u);
+    CHECK(nds9_read32(nds, 0x04100010u) == le32(big + 0x8000));
+    advance(nds, 4000);
+    /* Past the image reads FFh; the chip mirrors at its 128 KiB. */
+    cart_command(nds, 0xB7, 0x10000, 7);
+    CHECK(nds9_read32(nds, 0x04100010u) == 0xFFFFFFFFu);
+    advance(nds, 100);
+    cart_command(nds, 0xB7, 0x28000, 7);
+    CHECK(nds9_read32(nds, 0x04100010u) == le32(big + 0x8000));
+    advance(nds, 100);
+    cart_command(nds, 0xB8, 0, 7);
+    CHECK(nds9_read32(nds, 0x04100010u) == 0xC2u);
+    advance(nds, 100);
+    /* Cart DMA the way libnds does it: one word per request, repeating. */
+    nds9_write32(nds, 0x040000B0u, 0x04100010u);
+    nds9_write32(nds, 0x040000B4u, 0x02240000u);
+    nds9_write32(nds, 0x040000B8u, DMA_ON | DMA9_MODE(5) | DMA_WORD | DMA_REPEAT | DMA_SRC_FIXED | 1);
+    cart_command(nds, 0xB7, 0x9000, 1);
+    advance(nds, 5 * (8 + 0x200));
+    same = 1;
+    for (uint32_t i = 0; i < 0x200; i += 4)
+        if (nds9_read32(nds, 0x02240000u + i) != le32(big + 0x9000 + i)) same = 0;
+    CHECK(same && !(nds9_read32(nds, 0x040001A4u) & 0x80000000u));
+    CHECK(nds9_read32(nds, 0x02240200u) == 0);
+    /* EXMEMCNT bit 11 hands the slot to the ARM7. */
+    nds9_write16(nds, 0x04000204u, 0x0800);
+    CHECK(nds9_read32(nds, 0x040001A0u) == 0 && nds7_read16(nds, 0x040001A0u) == 0xC000);
+    nds_destroy(nds);
+}
+
+/* One SPI byte from the ARM7, with SPICNT set first. */
+static uint8_t spi(Nds *nds, uint16_t control, uint8_t byte) {
+    nds7_write16(nds, 0x040001C0u, control);
+    nds7_write8(nds, 0x040001C2u, byte);
+    return nds7_read8(nds, 0x040001C2u);
+}
+
+#define SPI_HOLD(dev) ((uint16_t)(0x8800u | (dev) << 8))
+#define SPI_LAST(dev) ((uint16_t)(0x8000u | (dev) << 8))
+
+static uint32_t touch_read(Nds *nds, uint8_t control) {
+    uint32_t hi, lo;
+    spi(nds, SPI_HOLD(2), control);
+    hi = spi(nds, SPI_HOLD(2), 0);
+    lo = spi(nds, SPI_LAST(2), 0);
+    return (hi << 8 | lo) >> 3;
+}
+
+static void flash_command(Nds *nds, uint8_t command, uint32_t address) {
+    spi(nds, SPI_HOLD(1), command);
+    spi(nds, SPI_HOLD(1), (uint8_t)(address >> 16));
+    spi(nds, SPI_HOLD(1), (uint8_t)(address >> 8));
+    spi(nds, SPI_HOLD(1), (uint8_t)address);
+}
+
+static void spi_checks(void) {
+    Nds *nds;
+    const uint8_t *fw;
+    uint8_t got[5];
+    nds_test_make_rom(rom, NULL);
+    nds = idle_machine(rom, sizeof rom);
+    fw = nds->firmware;
+    /* The generated image's checksums hold, and boot copied the settings. */
+    CHECK(nds_crc16(0, fw + 0x2C, 0x138) == (fw[0x2A] | fw[0x2B] << 8));
+    CHECK(nds_crc16(0xFFFF, fw + 0x3FF00, 0x70) == (fw[0x3FF72] | fw[0x3FF73] << 8));
+    CHECK(nds9_read16(nds, 0x027FFC80u) == 5 && nds9_read16(nds, 0x027FFC86u) == 'N');
+    CHECK(nds9_read32(nds, 0x027FF868u) == 0x3FE00u);
+    /* READ: a command, three address bytes, then data until deselect. */
+    flash_command(nds, 0x03, 0x000008);
+    for (int i = 0; i < 4; i++) got[i] = spi(nds, i < 3 ? SPI_HOLD(1) : SPI_LAST(1), 0);
+    CHECK(!memcmp(got, "MAC\x68", 4));
+    /* RDID, as a fresh command after the deselect. */
+    spi(nds, SPI_HOLD(1), 0x9F);
+    got[0] = spi(nds, SPI_HOLD(1), 0);
+    got[1] = spi(nds, SPI_HOLD(1), 0);
+    got[2] = spi(nds, SPI_LAST(1), 0);
+    CHECK(got[0] == 0x20 && got[1] == 0x40 && got[2] == 0x12);
+    /* WREN sets WEL; a page write needs it and clears it. */
+    spi(nds, SPI_LAST(1), 0x06);
+    spi(nds, SPI_HOLD(1), 0x05);
+    CHECK(spi(nds, SPI_LAST(1), 0) == 0x02);
+    flash_command(nds, 0x0A, 0x03FA10);
+    spi(nds, SPI_LAST(1), 0xAB);
+    CHECK(fw[0x3FA10] == 0xAB && fw[0x3FA11] == 0xFF);
+    spi(nds, SPI_HOLD(1), 0x05);
+    CHECK(spi(nds, SPI_LAST(1), 0) == 0x00);
+    flash_command(nds, 0x0A, 0x03FA11);
+    spi(nds, SPI_LAST(1), 0x00);
+    CHECK(fw[0x3FA11] == 0xFF); /* without WEL: ignored */
+    /* Touchscreen: with this calibration a 12-bit X or Y is 16 times the pixel;
+     * released, X reads 0 and Y FFFh. */
+    nds_set_touch(nds, 100, 50, 1);
+    CHECK(touch_read(nds, 0xD0) == 1600 && touch_read(nds, 0x90) == 800);
+    CHECK((touch_read(nds, 0xD8) >> 4) == 1600 >> 4); /* 8-bit mode */
+    nds_set_touch(nds, -1, -1, 0);
+    CHECK(touch_read(nds, 0xD0) == 0 && touch_read(nds, 0x90) == 0xFFF);
+    /* A new control byte can ride along with the last reply byte. */
+    nds_set_touch(nds, 10, 20, 1);
+    spi(nds, SPI_HOLD(2), 0xD0);
+    got[0] = spi(nds, SPI_HOLD(2), 0);
+    got[1] = spi(nds, SPI_HOLD(2), 0x90);
+    got[2] = spi(nds, SPI_HOLD(2), 0);
+    got[3] = spi(nds, SPI_LAST(2), 0);
+    CHECK(((got[0] << 8 | got[1]) >> 3) == 160 && ((got[2] << 8 | got[3]) >> 3) == 320);
+    /* Power management: read register 0, write it, read it back. */
+    spi(nds, SPI_HOLD(0), 0x80);
+    CHECK(spi(nds, SPI_LAST(0), 0) == 0x0D);
+    spi(nds, SPI_HOLD(0), 0x00);
+    spi(nds, SPI_LAST(0), 0x05);
+    spi(nds, SPI_HOLD(0), 0x84); /* register 4 mirrors 0 on the original DS */
+    CHECK(spi(nds, SPI_LAST(0), 0) == 0x05);
+    /* The SPI IRQ, when asked for. */
+    CHECK(!(nds->irf[1] & NDS_IRQ_SPI));
+    spi(nds, (uint16_t)(SPI_LAST(0) | 0x4000), 0x81);
+    CHECK(nds->irf[1] & NDS_IRQ_SPI);
+    nds_destroy(nds);
+}
+
+/* RTC bit-banging as GBATEK describes it: LSB first, data set with the clock
+ * low and taken as it rises. Pins: 0 data, 1 clock, 2 select, 4-6 directions. */
+static void rtc_pins(Nds *nds, unsigned pins) { nds7_write8(nds, 0x04000138u, (uint8_t)pins); }
+
+static void rtc_send(Nds *nds, uint8_t byte) {
+    for (int i = 0; i < 8; i++) {
+        unsigned bit = (byte >> i) & 1;
+        rtc_pins(nds, 0x74 | bit);
+        rtc_pins(nds, 0x76 | bit);
+    }
+}
+
+static uint8_t rtc_receive(Nds *nds) {
+    uint8_t byte = 0;
+    for (int i = 0; i < 8; i++) {
+        rtc_pins(nds, 0x64);
+        rtc_pins(nds, 0x66);
+        byte |= (uint8_t)((nds7_read8(nds, 0x04000138u) & 1) << i);
+    }
+    return byte;
+}
+
+/* `command` as sent; MSB-first commands (high nibble 6) carry the read bit in bit 0. */
+static void rtc_command(Nds *nds, uint8_t command, uint8_t *data, int count) {
+    int reading = (command & 0x0F) == 0x06 ? command >> 7 : command & 1;
+    rtc_pins(nds, 0x72);
+    rtc_pins(nds, 0x76);
+    rtc_send(nds, command);
+    for (int i = 0; i < count; i++) {
+        if (reading) data[i] = rtc_receive(nds);
+        else rtc_send(nds, data[i]);
+    }
+    rtc_pins(nds, 0x72);
+}
+
+static void rtc_checks(void) {
+    static const uint8_t expect[7] = {0x26, 0x11, 0x27, 5, 0x52, 0x34, 0x56}; /* a Friday, PM */
+    uint8_t leap_day[7] = {0x28, 0x02, 0x29, 0, 0x23, 0x59, 0x59};
+    Nds *nds;
+    uint8_t dt[7], stat = 0;
+    nds_test_make_rom(rom, NULL);
+    nds = idle_machine(rom, sizeof rom);
+    rtc_command(nds, 0x86, &stat, 1);
+    CHECK(stat == 0x02); /* 24-hour mode */
+    rtc_command(nds, 0xA6, dt, 7); /* unset, the clock starts at 2000-01-01, a Saturday */
+    CHECK(dt[0] == 0x00 && dt[1] == 0x01 && dt[2] == 0x01 && dt[3] == 6 && dt[4] == 0 && dt[6] == 0);
+    nds_set_wall_clock(nds, 1795782896); /* 2026-11-27 12:34:56 */
+    rtc_command(nds, 0xA6, dt, 7);
+    CHECK(!memcmp(dt, expect, 7));
+    /* Time runs, and survives a reset. */
+    advance(nds, NDS_ARM7_HZ);
+    rtc_command(nds, 0xE6, dt, 3);
+    CHECK(dt[0] == 0x52 && dt[1] == 0x34 && dt[2] == 0x57);
+    nds_reset(nds);
+    park(nds);
+    rtc_command(nds, 0xE6, dt, 3);
+    CHECK(dt[2] == 0x57);
+    /* Setting the time keeps the date; a command sent MSB first works too. */
+    dt[0] = 0x08;
+    dt[1] = 0x00;
+    dt[2] = 0x00;
+    rtc_command(nds, 0x66, dt, 3);
+    rtc_command(nds, 0x65, dt, 7); /* A6h bit-reversed */
+    CHECK(dt[0] == 0x26 && dt[2] == 0x27 && dt[4] == 0x08 && dt[5] == 0x00 && dt[6] == 0x00);
+    /* A whole date, 2028-02-29 23:59:59, and the second after it. */
+    rtc_command(nds, 0x26, leap_day, 7);
+    advance(nds, NDS_ARM7_HZ);
+    rtc_command(nds, 0xA6, dt, 7);
+    CHECK(dt[0] == 0x28 && dt[1] == 0x03 && dt[2] == 0x01 && dt[4] == 0x00 && dt[6] == 0x00);
+    nds_destroy(nds);
+}
+
 /* ---- headless runner ---------------------------------------------------- */
 
 static uint8_t *read_file(const char *path, size_t *size) {
@@ -583,6 +944,11 @@ int main(int argc, char **argv) {
     machine_checks();
     math_checks();
     input_checks();
+    timer_checks();
+    dma_checks();
+    cart_checks();
+    spi_checks();
+    rtc_checks();
     if (argc == 2) rom_checks(argv[1]);
     if (failures) {
         printf("test_nds: %d failure(s)\n", failures);

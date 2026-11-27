@@ -68,6 +68,10 @@ add_library(nacre_core STATIC
     src/nds/nds_io.c
     src/nds/nds_bios.c
     src/nds/nds_gpu2d.c
+    src/nds/nds_timer.c
+    src/nds/nds_dma.c
+    src/nds/nds_spi.c
+    src/nds/nds_rtc.c
     src/gb_input.c
     src/core/registry.c
     src/core/session.c
