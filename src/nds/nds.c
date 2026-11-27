@@ -58,6 +58,7 @@ void nds_reset(Nds *nds) {
     memset(nds->framebuffer, 0, sizeof nds->framebuffer);
     nds_mem_reset(nds);
     nds_io_reset(nds);
+    nds_gpu2d_reset(nds);
     nds_arm_reset(&nds->arm9, nds, 1);
     nds_arm_reset(&nds->arm7, nds, 0);
     nds_cp15_reset(nds);
@@ -100,13 +101,13 @@ static void display_irq(Nds *nds, uint32_t enable_bit, uint32_t irq) {
 }
 
 static void start_line(Nds *nds) {
+    nds_gpu2d_line_start(nds, nds->line);
     if (nds->line == NDS_SCREEN_HEIGHT) {
         display_irq(nds, 1u << 3, NDS_IRQ_VBLANK);
         nds_dma_trigger(nds, 0, NDS_DMA_VBLANK);
         nds_dma_trigger(nds, 1, NDS_DMA_VBLANK);
     }
     if (nds->line == 0) nds_dma_trigger(nds, 0, NDS_DMA_DISPLAY_START);
-    if (nds->line < NDS_SCREEN_HEIGHT) nds_dma_trigger(nds, 0, NDS_DMA_MAIN_DISPLAY);
     for (int cpu = 0; cpu < 2; cpu++) {
         uint32_t ds = nds->dispstat[cpu], target = (ds >> 8) | ((ds & 0x80) << 1);
         if ((ds & (1u << 5)) && nds->line == target) nds_irq_raise(nds, cpu, NDS_IRQ_VCOUNT);

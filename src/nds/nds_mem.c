@@ -46,9 +46,19 @@ static void map_pages(NdsVramPage *pages, unsigned count, uint32_t at, uint8_t *
     }
 }
 
+/* Extended palette slots are 8 KiB each. */
+static void map_slots(NdsVramPage *slots, unsigned first, unsigned count, uint8_t *bank) {
+    for (unsigned k = 0; k < count; k++) {
+        NdsVramPage *p = &slots[first + k];
+        if (p->count < 4) p->bank[p->count++] = bank + k * 0x2000;
+    }
+}
+
 void nds_map_vram(Nds *nds) {
     memset(nds->vmap9, 0, sizeof nds->vmap9);
     memset(nds->vmap7, 0, sizeof nds->vmap7);
+    memset(nds->bg_extpal, 0, sizeof nds->bg_extpal);
+    memset(nds->obj_extpal, 0, sizeof nds->obj_extpal);
     for (int b = 0; b < 9; b++) {
         uint8_t cnt = nds->vramcnt[b], *mem = nds->vram + bank_offset[b];
         unsigned mst = cnt & ((b <= 1 || b >= 7) ? 3 : 7), ofs = (cnt >> 3) & 3;
@@ -76,18 +86,24 @@ void nds_map_vram(Nds *nds) {
         } else if (b == 4) {
             if (mst == 1) region = NDS_VR_ABG;
             else if (mst == 2) region = NDS_VR_AOBJ;
+            else if (mst == 4) map_slots(nds->bg_extpal[0], 0, 4, mem); /* lower 32K */
         } else if (b <= 6) {
             at = 0x4000 * (ofs & 1) + 0x10000 * (ofs >> 1);
             if (mst == 1) region = NDS_VR_ABG;
             else if (mst == 2) region = NDS_VR_AOBJ;
+            else if (mst == 4) map_slots(nds->bg_extpal[0], (ofs & 1) * 2, 2, mem);
+            else if (mst == 5) map_slots(&nds->obj_extpal[0], 0, 1, mem);
         } else if (b == 7) {
             if (mst == 1) region = NDS_VR_BBG;
+            else if (mst == 2) map_slots(nds->bg_extpal[1], 0, 4, mem);
         } else {
             if (mst == 1) {
                 region = NDS_VR_BBG;
                 at = 0x8000;
             } else if (mst == 2) {
                 region = NDS_VR_BOBJ;
+            } else if (mst == 3) {
+                map_slots(&nds->obj_extpal[1], 0, 1, mem);
             }
         }
         /* Extended palettes and texture slots are not CPU-visible. */

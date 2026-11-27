@@ -261,6 +261,164 @@ static Nds *idle_machine(const uint8_t *image, size_t size) {
 
 static void advance(Nds *nds, uint32_t cycles) { nds_run_cycles(nds, cycles, error, sizeof error); }
 
+/* ---- M3: the 2D engines -------------------------------------------------- */
+
+/* A 15-bit color as the framebuffer shows it: each channel widened to 6 bits
+ * as X*2+1 (X > 0), then to 8. */
+static uint32_t rgb(uint32_t c) {
+    uint32_t px = 0;
+    for (int s = 0; s <= 10; s += 5) {
+        uint32_t v = (c >> s) & 31;
+        v = v ? v * 2 + 1 : 0;
+        px = (px << 8) | (v << 2) | (v >> 4);
+    }
+    return px;
+}
+
+/* Draws engine A's line `y` onto the top screen and returns pixel `x`. */
+static uint32_t line_px(Nds *nds, uint32_t y, uint32_t x) {
+    nds_gpu2d_line_start(nds, y);
+    nds_render_line(nds, y);
+    return nds_framebuffer(nds)[y * NDS_FRAME_WIDTH + x];
+}
+
+static void fill9(Nds *nds, uint32_t addr, uint16_t v, uint32_t count) {
+    for (uint32_t i = 0; i < count; i++) nds9_write16(nds, addr + i * 2, v);
+}
+
+static void gpu2d_checks(void) {
+    Nds *nds;
+    nds_test_make_rom(rom, NULL);
+    nds = idle_machine(rom, sizeof rom);
+    nds9_write16(nds, 0x04000304u, 0x8003);   /* both LCDs on, engine A on top */
+    nds9_write8(nds, 0x04000240u, 0x81);      /* bank A: engine A BG, 0x06000000 */
+    nds9_write8(nds, 0x04000241u, 0x82);      /* bank B: engine A OBJ, 0x06400000 */
+    nds9_write8(nds, 0x04000243u, 0x80);      /* bank D: LCDC, a capture target */
+    nds9_write16(nds, 0x05000000u, 0x7C00);   /* backdrop blue */
+    nds9_write16(nds, 0x05000000u + 35 * 2, 0x001F); /* BG palette 2, color 3: red */
+    nds9_write16(nds, 0x05000202u, 0x03E0);   /* OBJ palette 0, color 1: green */
+
+    /* Text BG0, 4bpp: char base 0x4000, map at 0. Tile 1 has one red pixel at
+     * (0,0); tile 2 is solid red. Map row 0: tile 1, then tile 1 H-flipped. */
+    nds9_write32(nds, 0x04000000u, 0x00010100u); /* display graphics, BG0 */
+    nds9_write16(nds, 0x04000008u, 1 << 2);
+    nds9_write16(nds, 0x06004000u + 32, 0x0003);
+    fill9(nds, 0x06004000u + 64, 0x3333, 16);
+    nds9_write16(nds, 0x06000000u, 0x2001);
+    nds9_write16(nds, 0x06000002u, 0x2401);
+    CHECK(line_px(nds, 0, 0) == rgb(0x001F) && line_px(nds, 0, 1) == rgb(0x7C00));
+    CHECK(line_px(nds, 0, 15) == rgb(0x001F) && line_px(nds, 0, 14) == rgb(0x7C00));
+    /* Scrolling: HOFS 1 moves the red pixel off the left edge onto x = 14. */
+    nds9_write16(nds, 0x04000010u, 1);
+    CHECK(line_px(nds, 0, 0) == rgb(0x7C00) && line_px(nds, 0, 14) == rgb(0x001F));
+    nds9_write16(nds, 0x04000010u, 0);
+
+    /* Solid BG from here on: tile 2 everywhere on row 0. */
+    fill9(nds, 0x06000000u, 0x2002, 32);
+    /* A 16x16 OBJ at x = 4, 1D tile mapping, solid green, priority 1. The other
+     * 127 are hidden: all-zero attributes make an 8x8 OBJ at (0,0). */
+    for (uint32_t i = 1; i < 128; i++) nds9_write16(nds, 0x07000000u + i * 8, 0x0200);
+    fill9(nds, 0x06400000u, 0x1111, 64);
+    nds9_write16(nds, 0x07000000u, 0x0000);
+    nds9_write16(nds, 0x07000002u, 0x4004);
+    nds9_write16(nds, 0x07000004u, 0x0400);
+    nds9_write32(nds, 0x04000000u, 0x00011110u); /* + OBJ, tile OBJs 1D */
+    CHECK(line_px(nds, 0, 4) == rgb(0x001F));   /* BG0 priority 0 beats OBJ priority 1 */
+    nds9_write16(nds, 0x04000008u, (1 << 2) | 2);
+    CHECK(line_px(nds, 0, 4) == rgb(0x03E0) && line_px(nds, 0, 3) == rgb(0x001F));
+    CHECK(line_px(nds, 0, 19) == rgb(0x03E0) && line_px(nds, 0, 20) == rgb(0x001F));
+    /* The OBJ wraps vertically: at Y = 250 it covers lines 250-255 and 0-9. */
+    nds9_write16(nds, 0x07000000u, 250);
+    CHECK(line_px(nds, 9, 4) == rgb(0x03E0) && line_px(nds, 10, 4) != rgb(0x03E0));
+    nds9_write16(nds, 0x07000000u, 0x0000);
+
+    /* Window 0 over x 8-15 on lines 0-9 shows only the OBJ; outside, only BG0. */
+    nds9_write16(nds, 0x04000040u, (8 << 8) | 16);
+    nds9_write16(nds, 0x04000044u, (0 << 8) | 10);
+    nds9_write16(nds, 0x04000048u, 0x10);
+    nds9_write16(nds, 0x0400004Au, 0x01);
+    nds9_write16(nds, 0x04000008u, 1 << 2); /* BG0 back in front */
+    nds9_write32(nds, 0x04000000u, 0x00013110u);
+    CHECK(line_px(nds, 0, 8) == rgb(0x03E0) && line_px(nds, 0, 15) == rgb(0x03E0));
+    CHECK(line_px(nds, 0, 4) == rgb(0x001F) && line_px(nds, 0, 16) == rgb(0x001F));
+    /* X1 > X2 wraps around the right edge: inside is x >= 250 or x < 6. */
+    nds9_write16(nds, 0x04000040u, (250 << 8) | 6);
+    CHECK(line_px(nds, 0, 5) == rgb(0x03E0) && line_px(nds, 0, 6) == rgb(0x001F));
+
+    /* Alpha blending BG0 over the backdrop, 8/16 + 8/16. */
+    nds9_write32(nds, 0x04000000u, 0x00010100u);
+    nds9_write16(nds, 0x04000050u, 0x2041);
+    nds9_write16(nds, 0x04000052u, 0x0808);
+    CHECK(line_px(nds, 0, 0) == rgb(0x3C0F));
+    /* Brightness increase by 16/16 is white; a semi-transparent OBJ blends
+     * over BG0 as long as BG0 is a 2nd target, whatever the effect. */
+    nds9_write16(nds, 0x04000050u, 0x0081);
+    nds9_write16(nds, 0x04000054u, 16);
+    CHECK(line_px(nds, 0, 0) == rgb(0x7FFF));
+    nds9_write16(nds, 0x04000000u, 0x1110);
+    nds9_write16(nds, 0x07000000u, 0x0400); /* semi-transparent */
+    nds9_write16(nds, 0x07000004u, 0x0000); /* priority 0, in front of BG0 */
+    nds9_write16(nds, 0x04000050u, 0x0181);
+    CHECK(line_px(nds, 0, 4) == rgb(0x01EF)); /* 8/16 green + 8/16 red */
+    nds9_write16(nds, 0x07000000u, 0x0000);
+    nds9_write16(nds, 0x07000004u, 0x0400);
+    nds9_write16(nds, 0x04000050u, 0);
+
+    /* Master brightness: up by 8/16 on 6-bit channels, down by 16/16 to black. */
+    nds9_write16(nds, 0x0400006Cu, (1 << 14) | 8);
+    CHECK(line_px(nds, 0, 0) == 0xFF7D7Du);
+    nds9_write16(nds, 0x0400006Cu, (2 << 14) | 16);
+    CHECK(line_px(nds, 0, 0) == 0);
+    nds9_write16(nds, 0x0400006Cu, 0);
+
+    /* Capture of the graphics screen into bank D, 256x192. */
+    nds9_write32(nds, 0x04000064u, 0x80330000u);
+    nds_gpu2d_line_start(nds, 0);
+    nds_render_line(nds, 0);
+    CHECK(nds->vram[0x60000] == 0x1F && nds->vram[0x60001] == 0x80); /* opaque red */
+    nds_gpu2d_line_start(nds, NDS_SCREEN_HEIGHT);
+    CHECK(!(nds9_read32(nds, 0x04000064u) & 0x80000000u)); /* done at line 192 */
+    /* Display mode 2 shows that bank as a bitmap. */
+    nds9_write32(nds, 0x04000000u, 0x000E0000u);
+    CHECK(line_px(nds, 0, 0) == rgb(0x001F));
+
+    /* Mode 5 BG3 as a 128x128 256-color bitmap at 0x8000; PA = 2 samples every
+     * other dot, and PD = 0 keeps the reference point on row 0 line after line. */
+    nds9_write16(nds, 0x05000000u + 5 * 2, 0x7FFF);
+    nds9_write16(nds, 0x06008000u + 10, 5); /* 8-bit VRAM writes are ignored */
+    nds9_write32(nds, 0x04000000u, 0x00010805u);
+    nds9_write16(nds, 0x0400000Eu, 0x0280);
+    nds9_write16(nds, 0x04000030u, 0x0200);
+    nds9_write16(nds, 0x04000036u, 0);
+    nds9_write32(nds, 0x04000038u, 0);
+    nds9_write32(nds, 0x0400003Cu, 0);
+    CHECK(line_px(nds, 0, 5) == rgb(0x7FFF) && line_px(nds, 0, 4) == rgb(0x7C00));
+    /* A reference point written mid-frame takes effect at once: X = 2.0. */
+    nds9_write32(nds, 0x04000038u, 2 << 8);
+    CHECK(line_px(nds, 0, 4) == rgb(0x7FFF));
+    /* Direct color: bit 15 makes a dot opaque. */
+    nds9_write32(nds, 0x04000038u, 0);
+    nds9_write16(nds, 0x0400000Eu, 0x0284);
+    nds9_write16(nds, 0x06008000u + 20, 0x801F);
+    nds9_write16(nds, 0x06008000u + 24, 0x03E0); /* no bit 15: transparent */
+    CHECK(line_px(nds, 0, 5) == rgb(0x001F) && line_px(nds, 0, 6) == rgb(0x7C00));
+
+    /* 256-color text BG0 through extended palette slot 0 in bank E. */
+    nds9_write8(nds, 0x04000244u, 0x80);
+    nds9_write16(nds, 0x06880000u + (256 + 7) * 2, 0x0210);
+    nds9_write8(nds, 0x04000244u, 0x84);
+    nds9_write16(nds, 0x06004000u + 3 * 64, 0x0007);
+    nds9_write16(nds, 0x06000000u, 0x1003); /* tile 3, palette 1 */
+    nds9_write16(nds, 0x04000008u, 0x0084);
+    nds9_write32(nds, 0x04000000u, 0x40010100u);
+    CHECK(line_px(nds, 0, 0) == rgb(0x0210));
+    nds9_write16(nds, 0x0500000Eu, 0x4210);
+    nds9_write32(nds, 0x04000000u, 0x00010100u); /* without bit 30: standard palette */
+    CHECK(line_px(nds, 0, 0) == rgb(0x4210));
+
+    nds_destroy(nds);
+}
+
 static void timer_checks(void) {
     Nds *nds;
     nds_test_make_rom(rom, NULL);
@@ -1000,25 +1158,25 @@ typedef struct {
  * the Thumb pages chain the same way. Its Thumb LDR/STR page has two checks
  * and its Thumb LDM/STM page none, so those are short by design. */
 static const Page armwrestler_pages[] = {
-    {NDS_BUTTON_START, 1, "ARM ALU 1", 0xb5e4993c51c84ca6ull},
-    {NDS_BUTTON_START, 1, "ARM ALU 2", 0x305ed9be27e29697ull},
-    {NDS_BUTTON_START, 1, "ARM LDR/STR 1", 0x7c995f19de41c805ull},
-    {NDS_BUTTON_START, 1, "ARM LDR/STR 2", 0x287849302305857cull},
-    {NDS_BUTTON_START, 1, "ARM LDM/STM", 0xbb3f8a3e47a53061ull},
+    {NDS_BUTTON_START, 1, "ARM ALU 1", 0x86796f4f638b72aaull},
+    {NDS_BUTTON_START, 1, "ARM ALU 2", 0x4935292865a49313ull},
+    {NDS_BUTTON_START, 1, "ARM LDR/STR 1", 0x4a2f57ed8f9a5289ull},
+    {NDS_BUTTON_START, 1, "ARM LDR/STR 2", 0x33c9d0c45389f2e0ull},
+    {NDS_BUTTON_START, 1, "ARM LDM/STM", 0x3a6e295db9fef09dull},
     {NDS_BUTTON_START, 1, "back to the menu", 0},
     {NDS_BUTTON_DOWN, 6, "", 0},
-    {NDS_BUTTON_START, 1, "ARM V5TE", 0xf84a96542ba808b9ull},
+    {NDS_BUTTON_START, 1, "ARM V5TE", 0xf4c3c497e28fc375ull},
     {NDS_BUTTON_START, 1, "back to the menu", 0},
     {NDS_BUTTON_UP, 3, "", 0},
-    {NDS_BUTTON_START, 1, "THUMB ALU", 0xae508123c702e192ull},
-    {NDS_BUTTON_START, 1, "THUMB LDR/STR", 0xa2d6d64585f9dca3ull},
-    {NDS_BUTTON_START, 1, "THUMB LDM/STM", 0x052b31de42a302bcull},
+    {NDS_BUTTON_START, 1, "THUMB ALU", 0xd76a6394c4bf6c4eull},
+    {NDS_BUTTON_START, 1, "THUMB LDR/STR", 0xd3f0983ec3561627ull},
+    {NDS_BUTTON_START, 1, "THUMB LDM/STM", 0x106a7798354c3ca0ull},
 };
 
 /* rockwrestler: A opens a submenu or runs a test, which ends on a screen with
  * just "OK" (the same for every test) or "FAIL nnn"; B goes back. Its main menu
  * entries, with how many tests each holds (INITIAL STATE only prints values). */
-#define ROCKWRESTLER_OK 0xbae543c79bb6bc9eull
+#define ROCKWRESTLER_OK 0xab514ac19d2e9ffeull
 static const struct {
     const char *name;
     int tests;
@@ -1126,6 +1284,7 @@ int main(int argc, char **argv) {
     timing_checks();
     machine_checks();
     math_checks();
+    gpu2d_checks();
     input_checks();
     timer_checks();
     dma_checks();

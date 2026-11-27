@@ -87,6 +87,14 @@ typedef struct {
 /* The VRAM regions the ARM9 sees, in 16 KiB pages. */
 enum { NDS_VR_ABG, NDS_VR_BBG, NDS_VR_AOBJ, NDS_VR_BOBJ, NDS_VR_LCDC, NDS_VR_COUNT };
 
+/* A 2D engine's display state beyond its registers (nds_gpu2d.c). */
+typedef struct {
+    int32_t ref_x[2], ref_y[2]; /* BG2/BG3 internal reference points, 20.8 fixed point */
+    uint8_t window_on[2];       /* WIN0/WIN1 vertical latches */
+} NdsEngine2d;
+
+#define NDS_MMEM_FIFO_SIZE 512u /* main-memory display FIFO, in pixels */
+
 /* ARM946E-S system control coprocessor (GBATEK, "ARM CP15 System Control
  * Coprocessor"). Registers without behavior are stored and read back. */
 typedef struct {
@@ -223,6 +231,16 @@ struct Nds {
     uint8_t vramcnt[9];
     NdsVramPage vmap9[NDS_VR_COUNT][64];
     NdsVramPage vmap7[16];
+    /* Extended palettes per engine, seen only by the display: four 8 KiB BG
+     * slots and one 8 KiB OBJ slot. */
+    NdsVramPage bg_extpal[2][4];
+    NdsVramPage obj_extpal[2];
+
+    /* The 2D engines: affine and window state, capture, main-memory FIFO. */
+    NdsEngine2d engine2d[2];
+    int capturing;
+    uint16_t mmem_fifo[NDS_MMEM_FIFO_SIZE];
+    uint32_t mmem_head, mmem_count;
 
     /* Interrupts. */
     uint32_t ime[2], ie[2], irf[2];
@@ -332,6 +350,15 @@ void nds_mem_reset(Nds *nds);
 void nds_map_wram(Nds *nds);
 void nds_map_vram(Nds *nds);
 
+/* nds_gpu2d.c */
+void nds_gpu2d_reset(Nds *nds);
+/* Called at the start of every line, VBlank included. */
+void nds_gpu2d_line_start(Nds *nds, uint32_t line);
+/* Draws a visible line at its HBlank. */
+void nds_render_line(Nds *nds, uint32_t line);
+/* ARM9 writes to the engines' registers (reference points, display FIFO). */
+void nds_gpu2d_io_write(Nds *nds, uint32_t off, uint32_t v, uint32_t mask);
+
 /* The bus of whichever CPU is executing. */
 static inline uint32_t nds_bus_read32(NdsArm *c, uint32_t a) {
     return c->v5 ? nds9_read32(c->nds, a) : nds7_read32(c->nds, a);
@@ -377,8 +404,5 @@ void nds_direct_boot(Nds *nds);
 /* Runs SWI `number` for `cpu`. It may leave the CPU halted with r15 unchanged, so
  * the SWI runs again after an interrupt (IntrWait). */
 void nds_bios_swi(NdsArm *cpu, uint32_t number);
-
-/* nds_gpu2d.c */
-void nds_render_line(Nds *nds, uint32_t line);
 
 #endif

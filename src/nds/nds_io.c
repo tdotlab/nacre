@@ -339,6 +339,7 @@ void nds_io_write(Nds *nds, int cpu, uint32_t addr, uint32_t v, uint32_t mask) {
         break;
     }
     raw_put(io, off, v, mask);
+    if (!cpu && (off & 0xFFF) < 0x70 && off < 0x1070) nds_gpu2d_io_write(nds, off, v, mask);
     if (!cpu) {
         if (off == 0x280 || off == 0x290 || off == 0x294 || off == 0x298 || off == 0x29C) divide(nds);
         else if (off == 0x2B0 || off == 0x2B8 || off == 0x2BC) square_root(nds);

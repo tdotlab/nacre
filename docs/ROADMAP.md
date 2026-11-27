@@ -181,8 +181,9 @@ benchmarks. The core runs at 74-80% of real time on the i5-8400, so the
 interpreter speed pass may move ahead of M7. M2 is done: timers, DMA, SPI
 (firmware, touch, power), the RTC and cart reads, checked at register level.
 The backup save chips (EEPROM, FLASH, FRAM, with type detection) moved
-ahead of M3 from M5, because two of three commercial games blocked on them;
-all three now reach their main loops with blank screens. M3 (2D) is next.
+ahead of M3 from M5, because two of three commercial games blocked on them.
+M3's 2D engines are in: Mario Kart DS and Altair's Chronicles show their menus,
+and Assassin's Creed II waits on 3D. M3's oracle comparison is still open.
 
 ## Suggested implementation settings
 

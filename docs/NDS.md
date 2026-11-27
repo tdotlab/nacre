@@ -2,12 +2,13 @@
 
 Status: M1 (CPUs, memory, BIOS, direct boot, test-ROM validation), M2
 (timers, DMA, SPI, RTC, cart reads) and the backup save chips (pulled forward
-from M5) done; M3 (2D) next. Both ARM CPUs run a cartridge from direct boot
-through our own BIOS, and display modes 0-3 show. The three commercial games
-tried all reach their main loops, with blank screens until M3. armwrestler
-passes all nine of its pages and rockwrestler all 23 of its tests, checked by
-frame hash in `make test`. Audio is still silent. The core runs at 74-80% of
-real time on the i5-8400 (see Risks). This file is the plan until the core exists, then it becomes the core's
+from M5) done; M3 (2D) implemented, its oracle comparison still open. Both ARM
+CPUs run a cartridge from direct boot through our own BIOS, and both 2D engines
+draw. Mario Kart DS and Altair's Chronicles show their menus correctly up to
+the 3D parts; Assassin's Creed II: Discovery draws everything through 3D and
+waits for M6. armwrestler passes all nine of its pages and rockwrestler all 23
+of its tests, checked by frame hash in `make test`. Audio is still silent. The
+core runs at 69-81% of real time on the i5-8400 (see Risks). This file is the plan until the core exists, then it becomes the core's
 reference, the way docs/PS2.md is for PS2.
 
 ## Shape
@@ -58,7 +59,9 @@ learned, in behavior terms. That keeps "our own code" true and checkable.
 Sources used so far: GBATEK (CPU, CP15, memory maps, I/O, BIOS functions, boot
 state and BIOS RAM usage, timers, DMA, cartridge protocol and chip IDs, SPI,
 firmware, touchscreen, power management, RTC, "DS Cartridge Backup" and the
-FLASH commands under "DS Firmware Serial Flash Memory"). The save-chip quirks
+FLASH commands under "DS Firmware Serial Flash Memory", the "DS Video" chapters
+with the GBA "LCD" chapters they build on, and "DS 3D Video" only for the 5-to-6
+bit color expansion). The save-chip quirks
 for Assassin's Creed II: Discovery come from tracing that game's own AUXSPI
 traffic. The rockwrestler ROM (prebuilt, run only) and armwrestler (assembled
 from its public source with the GNU Arm toolchain, run only) are test inputs,
@@ -252,6 +255,28 @@ harness grows with each milestone, as `test_gb` did.
    - Done when the 2D examples match the oracle, and a few 2D-heavy commercial
      games reach gameplay headlessly (Castlevania: Dawn of Sorrow and Advance
      Wars: Dual Strike are good first targets).
+   - Implemented in `nds_gpu2d.c`, drawn per line at HBlank: text, affine,
+     extended (16-bit map, 256-color and direct bitmaps) and large-bitmap BGs;
+     tile and bitmap OBJs with affine and double size; windows 0/1 (latched by
+     VCOUNT, wrapping X) and the OBJ window; alpha, brightness and
+     semi-transparent/bitmap OBJ blending; mosaic; BG and OBJ extended palettes
+     (banks E-I); master brightness on 6-bit channels; display capture into
+     LCDC banks; VRAM and main-memory display, with the FIFO fed by DMA as the
+     line is drawn; POWCNT1 screen swap. BG0 as 3D stays transparent until M6.
+   - The test ROMs' stored hashes changed with the 6-bit color path and the
+     now-drawn bottom screen (white while engine B is off, as GBATEK says);
+     every page was checked by eye before the new hashes went in.
+     `gpu2d_checks` in `test_nds.c` pins the features above register by
+     register.
+   - Smoke test, headless: Mario Kart DS through title, nickname dialogs and
+     mode/class select, with fades and translucent panels; Altair's Chronicles
+     through logos, language, title, difficulty and its opening scene.
+     Assassin's Creed II renders 3D on both screens (3D, capture into C/D,
+     engine B showing the last capture as a direct-color BG, screens swapped
+     each frame), so it shows only the white backdrop until M6.
+   - Open: no oracle comparison yet (needs built 2D examples and a black-box
+     run), and no 2D-heavy game on hand to reach gameplay with. Choices GBATEK
+     leaves open are listed at the top of `nds_gpu2d.c`.
 5. **M4, sound.**
    - PCM8/PCM16/IMA-ADPCM/PSG/noise channels, capture, and the 48 kHz
      resampled mix.
@@ -288,9 +313,10 @@ flashcart running the same test ROMs gives ground truth.
 
 **Speed.** An interpreted 67 MHz ARM9 plus a software rasterizer, in C, has to
 hit 60 fps on an i5-8400. It needs decode caching and fast paths, not a naive
-loop. Measured at the end of M1 (MSVC /O2, `test_nds --run ... --bench`, 10
-emulated seconds): 74% of real time on rockwrestler's menu and 80% on
-armwrestler, with no 2D layers, 3D or sound yet. The speed pass is planned for
+loop. Measured with MSVC /O2, `test_nds --run ... --bench`, 10 emulated
+seconds: 74% of real time on rockwrestler's menu and 80% on armwrestler at the
+end of M1; 69% and 81% with M3's 2D drawing, so the renderer costs little.
+Menus that idle in halt run faster (Mario Kart DS: 237%). The speed pass is planned for
 M7; doing at least the interpreter part before M3 would keep testing games
 practical.
 
