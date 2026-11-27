@@ -128,26 +128,25 @@ static void raw_put64(uint8_t *io, uint32_t off, uint64_t v) {
 
 static void divide(Nds *nds) {
     uint8_t *io = nds->io9;
-    uint32_t cnt = raw_get(io, 0x280) & 3;
+    uint32_t mode = raw_get(io, 0x280) & 3;
     uint64_t numer = raw_get64(io, 0x290), denom = raw_get64(io, 0x298);
     int64_t n, d, q, r;
     int inverts = 0;
-    if (cnt == 0) {
+    if (mode == 0) {
         n = (int32_t)(uint32_t)numer;
         d = (int32_t)(uint32_t)denom;
-    } else if (cnt == 2) {
+    } else if (mode == 2) {
         n = (int64_t)numer;
         d = (int64_t)denom;
     } else {
         n = (int64_t)numer;
         d = (int32_t)(uint32_t)denom;
     }
-    cnt = (raw_get(io, 0x280) & 0x3) | (denom == 0 ? 0x4000 : 0);
     if (d == 0) {
         q = n < 0 ? 1 : -1;
         r = n;
-        inverts = cnt == 0;
-    } else if (cnt == 0 && n == INT32_MIN && d == -1) {
+        inverts = mode == 0;
+    } else if (mode == 0 && n == INT32_MIN && d == -1) {
         q = n;
         r = 0;
         inverts = 1;
@@ -159,7 +158,8 @@ static void divide(Nds *nds) {
         r = n % d;
     }
     if (inverts) q = (int64_t)((uint64_t)q ^ 0xFFFFFFFF00000000ull);
-    raw_put(io, 0x280, cnt, 0xFFFF);
+    /* DIV0 (bit 14) looks at the full 64-bit denominator, even in 32-bit mode. */
+    raw_put(io, 0x280, mode | (denom == 0 ? 0x4000u : 0), 0xFFFF);
     raw_put64(io, 0x2A0, (uint64_t)q);
     raw_put64(io, 0x2A8, (uint64_t)r);
 }

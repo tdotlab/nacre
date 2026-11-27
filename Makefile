@@ -54,14 +54,15 @@ tests/test_nacre_core: tests/test_nacre_core.c tests/nds_test_rom.h $(CORE_SOURC
 tests/test_nacre_session: tests/test_nacre_session.c $(CORE_SOURCES) $(CORE_HEADERS)
 	$(CC) -Iinclude $(CFLAGS) -o $@ tests/test_nacre_session.c $(CORE_SOURCES) -lm
 
-# Game Boy ROM checks are skipped unless tools/get-gb-test-roms.py has fetched them.
+# Game Boy and DS ROM checks are skipped unless tools/get-gb-test-roms.py and
+# tools/get-nds-test-roms.py have fetched them.
 test: tests/test_scheduler tests/test_core tests/test_demo tests/test_gb tests/test_gb_input tests/test_nds tests/test_nacre_core tests/test_nacre_session
 	./tests/test_scheduler
 	./tests/test_core
 	./tests/test_demo
 	./tests/test_gb_input
 	./tests/test_gb .roms-cache/gb
-	./tests/test_nds
+	./tests/test_nds .roms-cache/nds
 	./tests/test_nacre_core
 	./tests/test_nacre_session
 

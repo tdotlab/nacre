@@ -47,11 +47,12 @@ jobs:
             libudev-dev libusb-1.0-0-dev libwayland-dev libx11-dev \
             libxcursor-dev libxext-dev libxfixes-dev libxi-dev \
             libxinerama-dev libxkbcommon-dev libxrandr-dev libxrender-dev \
-            libxss-dev libxtst-dev
+            libxss-dev libxtst-dev binutils-arm-none-eabi
       - name: Core and welcome ROM checks
         if: runner.os == 'Linux'
         run: |
           python3 -I tools/get-gb-test-roms.py
+          python3 -I tools/get-nds-test-roms.py
           make test
           python3 tools/build-demo.py --check
       - name: Configure macOS universal build

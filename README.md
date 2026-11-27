@@ -230,10 +230,11 @@ The core is checked against public test ROMs, which are fetched into the ignored
 
 ```sh
 python3 tools/get-gb-test-roms.py   # Blargg, dmg-acid2, Mooneye Test Suite
-make test                           # includes tests/test_gb (116 ROM checks + built-ins)
+python3 tools/get-nds-test-roms.py  # rockwrestler; armwrestler (needs arm-none-eabi binutils)
+make test                           # includes tests/test_gb (116 ROM checks + built-ins) and tests/test_nds
 ```
 
-`tests/test_gb --run ROM --seconds N --dump out.pgm --press start:9` runs one ROM headlessly. It holds a button at a given time and writes the final frame, which is how real games are smoke-tested.
+`tests/test_gb --run ROM --seconds N --dump out.pgm --press start:9` runs one ROM headlessly. It holds a button at a given time and writes the final frame, which is how real games are smoke-tested. `tests/test_nds --run game.nds --frames N --press START@60 --dump out.ppm@100 --bench` does the same for the DS, counting in frames, and prints frame hashes and speed.
 
 ## PS2 core (Windows, experimental)
 

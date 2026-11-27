@@ -1,11 +1,11 @@
 # Nintendo DS core
 
-Status: M1a (CPUs, memory, BIOS, direct boot) done; M1b (test-ROM validation)
-next. Both ARM CPUs run a cartridge from direct boot through our own BIOS, and
-display modes 0-3 show. The built-in test cartridge passes end to end, and the
-homebrew test ROM rockwrestler boots to its menu, but nothing has been checked
-against armwrestler or rockwrestler's own pass/fail pages yet. Audio is still
-silent. This file is the plan until the core exists, then it becomes the core's
+Status: M1 (CPUs, memory, BIOS, direct boot, test-ROM validation) done; M2
+(timers, DMA, SPI, RTC, cart reads) next. Both ARM CPUs run a cartridge from
+direct boot through our own BIOS, and display modes 0-3 show. armwrestler
+passes all nine of its pages and rockwrestler all 23 of its tests, checked by
+frame hash in `make test`. Audio is still silent. The core runs at 74-80% of
+real time on the i5-8400 (see Risks). This file is the plan until the core exists, then it becomes the core's
 reference, the way docs/PS2.md is for PS2.
 
 ## Shape
@@ -31,7 +31,7 @@ PS2 builds on Windows only.
 | `src/nds/nds_gpu3d.c`, `nds_raster.c` | Geometry engine; software rasterizer |
 | `src/nds/nds_spu.c` | 16 sound channels, capture, mix resampled to 48 kHz |
 | `src/nds/nds_state.c` | Save states |
-| `tests/test_nds.c`, `tools/get-nds-test-roms.py` | ROM-driven checks and the headless run/dump/press tool, like `test_gb` |
+| `tests/test_nds.c`, `tools/get-nds-test-roms.py` | ROM-driven checks and the headless run/press/touch/dump/bench tool, like `test_gb` |
 
 ## Fixed decisions
 
@@ -54,7 +54,8 @@ learned, in behavior terms. That keeps "our own code" true and checkable.
 Sources used so far: GBATEK (CPU, CP15, memory maps, I/O, BIOS functions, boot
 state). The rockwrestler ROM (prebuilt, run only) and armwrestler (assembled
 from its public source with the GNU Arm toolchain, run only) are test inputs,
-not references.
+not references. Their source was read only to learn how to drive them (which
+button opens which page) and what a failing test number checks.
 
 **Video.** One XRGB8888 frame, 256×384: top screen over bottom, no gap, square
 pixels, so the frontends integer-scale it as they do the Game Boy. DS colors are
@@ -153,11 +154,21 @@ harness grows with each milestone, as `test_gb` did.
      hardware does (GBATEK marks it "(!)"); every game sets its own.
    - The built-in test cartridge (`tests/nds_test_rom.s`) exercises boot, a
      SWI, IPCSYNC, the display and VBlank IRQs through the BIOS trampoline.
-   - **M1b, next.** `--press/--touch/--bench` in `test_nds`,
-     `tools/get-nds-test-roms.py` (pinned sources; assemble armwrestler and pack
-     it with our own `.nds` packer; fetch rockwrestler), and fixes until
-     armwrestler passes every page and rockwrestler passes, by frame hash.
-     BlocksDS stays optional.
+   - **M1b, done.** `test_nds --run` takes `--press KEY@F[+L]`,
+     `--touch X,Y@F[+L]`, `--dump [FILE][@F]` (prints a frame hash, optionally
+     writes a PPM) and `--bench`. `tools/get-nds-test-roms.py` fetches
+     rockwrestler and armwrestler's source, pinned by commit and SHA-256,
+     assembles armwrestler with GNU Arm binutils and packs it with its own
+     `.nds` packer (blank logo, matching checksum). `test_nds .roms-cache/nds`
+     drives one machine through armwrestler's nine pages and rockwrestler's 23
+     tests and compares each screen with a hash recorded after checking it by
+     eye; every rockwrestler test ends on the same "OK" screen. CI installs
+     `binutils-arm-none-eabi` and runs them on Linux.
+   - The one bug they found: the divider skipped GBATEK's upper-half inversion
+     on 32-bit DIV0 whenever the whole denominator was zero, because the DIV0
+     flag was folded into the mode before the mode was tested. `math_checks`
+     covers the overflow cases without a ROM.
+   - BlocksDS stays optional.
    - Deferred to M2: timers, DMA, SPI (firmware settings, touch, power), RTC
      and cart data-mode reads.
 3. **M2, the rest of the system.**
@@ -206,8 +217,12 @@ own BlocksDS tests are the plan. Real hardware would be better: a DS with a
 flashcart running the same test ROMs gives ground truth.
 
 **Speed.** An interpreted 67 MHz ARM9 plus a software rasterizer, in C, has to
-hit 60 fps on an i5-8400. That should fit, but it needs decode caching and fast
-paths, not a naive loop. Measure from M1 with a `--bench` flag.
+hit 60 fps on an i5-8400. It needs decode caching and fast paths, not a naive
+loop. Measured at the end of M1 (MSVC /O2, `test_nds --run ... --bench`, 10
+emulated seconds): 74% of real time on rockwrestler's menu and 80% on
+armwrestler, with no 2D layers, 3D or sound yet. The speed pass is planned for
+M7; doing at least the interpreter part before M3 would keep testing games
+practical.
 
 **Timing-sensitive games.** Caches and exact bus timing are not modelled. A few
 games will need fixes once they are found.

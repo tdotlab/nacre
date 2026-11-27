@@ -23,7 +23,7 @@ audio devices.
 | `include/nacre_session.h`, `src/core/session.c` | One running game: core choice, candidate-swap open, sibling `.sav` with debounced writes, `.state1`..`.state4` slots, remembered per-core options, the native-video surface (attached after load, before the first run); file I/O through host callbacks |
 | `src/desktop/audio_out.c` | SDL3 output for any core: one stream at the core's rate, speed as frequency ratio, 40-150 ms queue, silent fast-forward |
 | `tests/test_gb.c`, `tools/get-gb-test-roms.py` | ROM-driven core checks; headless run/dump/press tool |
-| `tests/test_nds.c`, `tests/nds_test_rom.h` | DS header, timing, input and machine checks on a synthetic ROM (program source in `tests/nds_test_rom.s`); headless run/dump tool |
+| `tests/test_nds.c`, `tests/nds_test_rom.h`, `tools/get-nds-test-roms.py` | DS header, timing, input, math and machine checks on a synthetic ROM (program source in `tests/nds_test_rom.s`), armwrestler and rockwrestler by frame hash; headless run/press/touch/dump/bench tool |
 | `src/macos/main.m` | ARC-managed AppKit app: native menus/panels, drawn sidebar and display, rebinding sheet; runs every registered core through a session, with the same per-system look table as Windows |
 | `src/macos/Info.plist.in` | Mac identity, version, document associations, OS requirement |
 | `src/windows/main.cpp` | Win32 + GDI+ app: window, owner-drawn controls, menus, dialogs, drop target, registry prefs; runs every registered core through a session, with per-system looks (keypad or pad, speed in Hz or ×) keyed by core id; gives native-video cores a child window in the display well |
